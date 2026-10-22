@@ -7,3 +7,5 @@ __pycache__/
 
 # Ignore all .log files
 *.log
+*.tflite
+*.pt
