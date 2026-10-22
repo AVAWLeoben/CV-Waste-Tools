@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Cross-platform GreenPlast launcher for dataset splitting and annotation audit."""
+"""Cross-platform CV Waste launcher for training, annotation audit and recall testing."""
 from __future__ import annotations
 
 import argparse
@@ -20,9 +20,9 @@ from greenplast_environment import (APP_DIR, EnvironmentManager, probe_env,
 class Launcher:
     def __init__(self, prepared=None):
         self.root = tk.Tk()
-        self.root.title("GreenPlast · Model Tools")
-        self.root.geometry("790x545")
-        self.root.minsize(680, 490)
+        self.root.title("CV Waste Tools")
+        self.root.geometry("990x565")
+        self.root.minsize(850, 510)
         self.msgs = queue.Queue()
         self.conda = None
         self.env = None
@@ -44,6 +44,7 @@ class Launcher:
         self.retry.configure(state="normal")
         self.train_button.configure(state="normal")
         self.audit_button.configure(state="normal")
+        self.recall_button.configure(state="normal")
         self.progress.configure(mode="determinate", maximum=100, value=100)
         self.status.set("Ready — choose a tool")
         self.env_text.set(
@@ -65,27 +66,34 @@ class Launcher:
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(6, weight=1)
-        ttk.Label(outer, text="GreenPlast  /  Model Tools",
+        ttk.Label(outer, text="CV Waste  /  Model Tools",
                   font=("Segoe UI", 20, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(outer, text="Train and split datasets, or inspect YOLO annotations.",
+        ttk.Label(outer, text="Train models, audit labels, or evaluate recall at a target precision.",
                   foreground="#555555").grid(row=1, column=0, sticky="w", pady=(4, 18))
 
         buttons = ttk.Frame(outer)
         buttons.grid(row=2, column=0, sticky="ew")
         buttons.columnconfigure(0, weight=1)
         buttons.columnconfigure(1, weight=1)
+        buttons.columnconfigure(2, weight=1)
         self.train_button = ttk.Button(buttons, text="Open  ·  Split & Train",
                                        command=lambda: self.launch("train"), state="disabled")
         self.train_button.grid(row=0, column=0, sticky="ew", padx=(0, 8), ipady=16)
         self.audit_button = ttk.Button(buttons, text="Open  ·  Annotation Audit",
                                        command=lambda: self.launch("audit"), state="disabled")
-        self.audit_button.grid(row=0, column=1, sticky="ew", padx=(8, 0), ipady=16)
+        self.audit_button.grid(row=0, column=1, sticky="ew", padx=8, ipady=16)
+        self.recall_button = ttk.Button(buttons, text="Open  ·  Precision / Recall Test",
+                                        command=lambda: self.launch("recall"), state="disabled")
+        self.recall_button.grid(row=0, column=2, sticky="ew", padx=(8, 0), ipady=16)
         ttk.Label(buttons, text="Combine folders, make train/val/test lists, optionally train YOLO.",
-                  wraplength=320, foreground="#555555").grid(row=1, column=0,
+                  wraplength=280, foreground="#555555").grid(row=1, column=0,
                                                            sticky="w", padx=(2, 14), pady=(8, 0))
         ttk.Label(buttons, text="Find class disagreements and suspicious boxes; export review CSV.",
-                  wraplength=320, foreground="#555555").grid(row=1, column=1,
+                  wraplength=280, foreground="#555555").grid(row=1, column=1,
                                                            sticky="w", padx=(16, 0), pady=(8, 0))
+        ttk.Label(buttons, text="Find a confidence threshold meeting a chosen Food precision, and record recall.",
+                  wraplength=280, foreground="#555555").grid(row=1, column=2,
+                                                              sticky="w", padx=(16, 0), pady=(8, 0))
         ttk.Separator(outer, orient="horizontal").grid(row=3, column=0, sticky="ew", pady=20)
         info = ttk.Frame(outer)
         info.grid(row=4, column=0, sticky="ew")
@@ -127,6 +135,7 @@ class Launcher:
         self.busy = True
         self.train_button.configure(state="disabled")
         self.audit_button.configure(state="disabled")
+        self.recall_button.configure(state="disabled")
         self.retry.configure(state="disabled")
         self.status.set("Loading saved environment ..." if not force else "Rechecking Conda environment ...")
         self.env_text.set("Environment: checking")
@@ -170,6 +179,7 @@ class Launcher:
                     self.retry.configure(state="normal")
                     self.train_button.configure(state="normal")
                     self.audit_button.configure(state="normal")
+                    self.recall_button.configure(state="normal")
                     self.status.set("Ready — choose a tool")
                     self.env_text.set(f"{MANAGED_DISPLAY_NAME if self.env.name.lower() == MANAGED_NAME else self.env.name} "
             f"({self.env})  |  PyTorch {details.get('torch', '?')}  |  "

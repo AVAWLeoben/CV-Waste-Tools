@@ -1,10 +1,13 @@
-GREENPLAST TOOLS - WINDOWS + LINUX
+CV WASTE TOOLS - WINDOWS + LINUX
 =================================
 
-Two applications in one launcher:
+Three applications in one launcher:
   (1) Split & Train: make no-copy YOLO train/val/test manifests and train models.
   (2) Annotation Audit: check labeled images using a YOLO model and export a
       CSV for the CV Waste Web REVIEW task. It does not edit annotation files.
+  (3) Precision / Recall Test: select a YOLO model, dataset YAML or image folder,
+      and target Food precision. Runs validation and reports confidence threshold
+      and recall, with CSV and JSON reports.
 
 QUICK START - WINDOWS 10/11
 ---------------------------
@@ -27,7 +30,7 @@ QUICK START - LINUX (DESKTOP / X11 OR XWAYLAND)
 
    Or: bash START_GREENPLAST.sh
 
-4. After dependency checks, choose Split & Train or Annotation Audit.
+4. After dependency checks, choose Split & Train, Annotation Audit or Precision / Recall Test.
 
 The Linux shell script works even if the Conda base environment does not
 have tkinter, torch, numpy, or ultralytics. The script locates Conda and
@@ -121,7 +124,7 @@ WORKFLOW / FILES
 - START_CV_WASTE_TOOLS.vbs: Windows one-click GUI start (no console).
 - START_GREENPLAST.bat: Windows diagnostic start (one console).
 - START_GREENPLAST.sh: Linux shell start.
-- greenplast_launcher.py: common GUI with buttons for both applications.
+- greenplast_launcher.py: common GUI with buttons for all three applications.
 - greenplast_bootstrap.py: standard-library environment bootstrap for Linux,
   also used by Windows when Conda base lacks tkinter.
 - greenplast_environment.py: shared Conda discovery, validation and installer.
@@ -129,6 +132,11 @@ WORKFLOW / FILES
 - audit_dataset_review_gui.py: non-recursive annotation audit; reads YOLO
   detection BBOX labels with 5 fields or saved-confidence labels with 6
   fields. Unannotated/background images are skipped by default.
+- test_model_recall_at_precision.py: Tkinter confidence-threshold and recall evaluation.
+  Supports data.yaml/autosplit_data.yaml with test/val/train selection, or an
+  image folder in standard YOLO labels layout. Exports operating_point_summary.json,
+  food_precision_recall_by_confidence.csv and Ultralytics validation plots.
+  A model prediction precision target is not a physical mass-based purity target.
 - run_tool.py: starts the selected tool in the chosen environment.
 - requirements.txt: Ultralytics and other Python dependencies.
 

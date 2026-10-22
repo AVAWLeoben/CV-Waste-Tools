@@ -1,0 +1,9 @@
+# Ignore log directory
+CV-Waste-Tools/logs/
+CV-Waste-Tools/audit_logs/
+
+# Ignore Python cache directories
+__pycache__/
+
+# Ignore all .log files
+*.log
