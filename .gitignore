@@ -1,6 +1,8 @@
 # Ignore log directory
 CV-Waste-Tools/logs/
 CV-Waste-Tools/audit_logs/
+CV_Waste-Tools/precision_recall_test_logs/
+CV_Waste-Tools/__pycache__/
 
 # Ignore Python cache directories
 __pycache__/
