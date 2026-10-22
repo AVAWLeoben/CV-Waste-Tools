@@ -1,4 +1,0 @@
-from ultralytics import YOLO
-model = YOLO("yolo26n-seg.pt")
-model = YOLO("yolo11n-seg.pt")
-model = YOLO("yolov8n-seg.pt")

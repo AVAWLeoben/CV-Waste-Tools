@@ -193,12 +193,12 @@ if /I "%CONFIRM%"=="N" goto START
 echo.
 echo Checking WSL environment and installing dependencies if needed...
 echo.
-if not exist "%WINDOWS_WORKDIR%setup_yolo_export_python311_repaired.sh" (
-    echo ERROR: setup_yolo_export_python311_repaired.sh is missing from the script folder.
+if not exist "%WINDOWS_WORKDIR%setup_yolo_export.sh" (
+    echo ERROR: setup_yolo_export.sh is missing from the script folder.
     pause
     exit /b 4
 )
-wsl.exe --cd "%WINDOWS_WORKDIR%" bash ./setup_yolo_export_python311_repaired.sh
+wsl.exe --cd "%WINDOWS_WORKDIR%" bash ./setup_yolo_export.sh
 if errorlevel 1 (
     echo.
     echo ERROR: WSL environment setup or verification failed.
