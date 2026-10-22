@@ -5,8 +5,16 @@ rem ============================================================
 rem AVAW LiteRT Export Menu
 rem ============================================================
 
-set "WINDOWS_WORKDIR=C:\Users\GKoinig\Documents\WSL"
-set "WSL_WORKDIR=/mnt/c/Users/GKoinig/Documents/WSL"
+set "WINDOWS_WORKDIR=%~dp0"
+rem Resolve the folder through WSL itself (supports custom drive mounts).
+set "WSL_WORKDIR="
+for /f "usebackq delims=" %%P in (`wsl.exe wslpath -a -u "%WINDOWS_WORKDIR%" 2^>nul`) do set "WSL_WORKDIR=%%P"
+if not defined WSL_WORKDIR (
+    echo ERROR: Could not resolve the script folder in WSL.
+    echo Check that WSL is installed and the drive is accessible.
+    pause
+    exit /b 2
+)
 set "WSL_ENV=~/yolo_export"
 set "PY_SCRIPT=export_to_litert_menu_cli.py"
 

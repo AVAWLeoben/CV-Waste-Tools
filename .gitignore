@@ -11,3 +11,8 @@ __pycache__/
 *.log
 *.tflite
 *.pt
+*.csv
+*.json
+*.png
+*.npz
+*.pyc
