@@ -6,15 +6,8 @@ rem AVAW LiteRT Export Menu
 rem ============================================================
 
 set "WINDOWS_WORKDIR=%~dp0"
-rem Resolve the folder through WSL itself (supports custom drive mounts).
-set "WSL_WORKDIR="
-for /f "usebackq delims=" %%P in (`wsl.exe wslpath -a -u "%WINDOWS_WORKDIR%" 2^>nul`) do set "WSL_WORKDIR=%%P"
-if not defined WSL_WORKDIR (
-    echo ERROR: Could not resolve the script folder in WSL.
-    echo Check that WSL is installed and the drive is accessible.
-    pause
-    exit /b 2
-)
+rem WSL --cd accepts a Windows folder path directly; no wslpath conversion needed.
+rem This also works when the Windows username or folder location changes.
 set "WSL_ENV=~/yolo_export"
 set "PY_SCRIPT=export_to_litert_menu_cli.py"
 
@@ -189,7 +182,7 @@ echo WSL environment:
 echo   %WSL_ENV%
 echo.
 echo Working folder:
-echo   %WSL_WORKDIR%
+echo   %WINDOWS_WORKDIR%
 echo.
 echo ============================================================
 echo.
@@ -198,23 +191,25 @@ set /p "CONFIRM=Start export? [Y/n]: "
 if /I "%CONFIRM%"=="N" goto START
 
 echo.
-echo Checking WSL environment...
-wsl.exe bash -lc "test -x %WSL_ENV%/bin/python"
+echo Checking WSL environment and installing dependencies if needed...
+echo.
+if not exist "%WINDOWS_WORKDIR%setup_yolo_export.sh" (
+    echo ERROR: setup_yolo_export.sh is missing from the script folder.
+    pause
+    exit /b 4
+)
+wsl.exe --cd "%WINDOWS_WORKDIR%" bash ./setup_yolo_export.sh
 if errorlevel 1 (
     echo.
-    echo ERROR: WSL environment not found or not usable:
-    echo   %WSL_ENV%
-    echo.
+    echo ERROR: WSL environment setup or verification failed.
     pause
     exit /b 4
 )
 
-echo WSL environment found.
 echo.
 echo Starting export...
 echo.
-
-wsl.exe bash -lc "set -e; source %WSL_ENV%/bin/activate; cd '%WSL_WORKDIR%'; python '%PY_SCRIPT%' --model '%MODEL%' --imgsz '%IMGSZ%' --nms '%NMS%' --int8 '%INT8%' --half '%HALF%'"
+wsl.exe --cd "%WINDOWS_WORKDIR%" bash -c "exec ~/yolo_export/bin/python export_to_litert_menu_cli.py --model '%MODEL%' --imgsz '%IMGSZ%' --nms %NMS% --int8 %INT8% --half %HALF%"
 set "RC=%ERRORLEVEL%"
 
 echo.
