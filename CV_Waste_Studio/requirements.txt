@@ -1,0 +1,4 @@
+ultralytics
+numpy
+PyYAML
+opencv-python

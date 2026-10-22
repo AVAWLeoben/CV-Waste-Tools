@@ -1,0 +1,33 @@
+CV WASTE STUDIO — REDESIGN SUMMARY
+=================================
+
+What changed
+- Replaced the launcher-with-three-other-windows design with a single desktop
+  shell, fixed sidebar navigation, consistent styling and one activity dock.
+- Embedded the three existing GUI forms as persistent views of the same Tk root.
+- Added vertical scrolling where long forms would otherwise clip controls.
+- Added horizontal scrolling to audit/recall on narrower displays.
+- Split/training now runs headlessly in the same verified Conda environment,
+  with no separate tool GUI and no frozen desktop interface.
+- Added a Stop running job control with explicit confirmation.
+- Added session activity logs for the audit, recall and environment views.
+- Preserved each backend's existing output formats, choices and validation.
+- Preserved standalone modules for backward compatibility.
+
+Smoke checks carried out
+- Python syntax compilation of all edited Python modules.
+- Windows-independent Tk GUI setup/navigation under a virtual X11 display.
+- Window resizing at 1010x690, 1220x740 and 1290x845.
+- Shared activity view updates from each tool page.
+- Split-only worker completion on a 20-image synthetic dataset, with a minimal
+  simulated Ultralytics autosplit implementation; all three split manifests
+  and dataset YAML were generated with expected image counts.
+- Linux START_GREENPLAST.sh shell syntax check.
+
+Not tested here
+- Actual Ultralytics inference/training and accelerator performance (full
+  third-party dependency is not installed in the build/test environment).
+- The Windows Conda bootstrap path on a Windows workstation.
+- Image dataset audits or cached precision/recall on your real checkpoints.
+
+See README_FIRST.txt for setup and operating instructions.
