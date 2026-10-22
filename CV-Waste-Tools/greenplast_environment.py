@@ -239,7 +239,12 @@ def torch_install_plan(driver_cuda: tuple[int, int] | None,
     compatible, pinned PyTorch family rather than tracking latest.
     """
     if gpu_cc is not None and gpu_cc < (7, 5):
-        if driver_cuda is not None and driver_cuda >= (12, 1):
+        if driver_cuda is None:
+            # A CUDA version missing from the nvidia-smi display does not
+            # mean that GPU execution is impossible. Choose a conservative
+            # legacy wheel and verify with a real kernel later.
+            wheel = 'cu118'
+        elif driver_cuda >= (12, 1):
             wheel = 'cu121'
         elif driver_cuda is not None and driver_cuda >= (11, 8):
             wheel = 'cu118'
@@ -250,7 +255,17 @@ def torch_install_plan(driver_cuda: tuple[int, int] | None,
                 'report CUDA >= 11.8. Update the driver first.')
         return {'wheel': wheel, 'torch': PASCAL_TORCH,
                 'torchvision': PASCAL_TORCHVISION, 'legacy': True}
-    wheel = torch_index(driver_cuda)
+    if gpu_cc is not None and gpu_cc >= (12, 0):
+        # RTX 50-series (Blackwell, sm_120) needs modern CUDA wheels.
+        # If the version banner is unavailable, try cu128; the full CUDA
+        # probe will reject an incompatible installed NVIDIA driver.
+        if driver_cuda is not None and driver_cuda < (12, 8):
+            raise RuntimeError(
+                f'GPU sm_{gpu_cc[0]}{gpu_cc[1]} requires a driver supporting '
+                'CUDA 12.8 or newer; update the NVIDIA driver.')
+        wheel = torch_index(driver_cuda) if driver_cuda else 'cu128'
+    else:
+        wheel = torch_index(driver_cuda) if driver_cuda else 'cu128'
     return {'wheel': wheel, 'torch': None, 'torchvision': None,
             'legacy': False}
 
@@ -485,6 +500,13 @@ def cached_environment(expected_conda: str | None = None,
         return None
     if not details.get('ok'):
         return None
+    # A cached CPU environment is not suitable when this machine has a
+    # functioning NVIDIA device. Avoid silently using CPU after a GPU/driver
+    # upgrade, or when another Conda environment already supports CUDA.
+    fingerprint = saved.get('gpu_fingerprint', '')
+    if (isinstance(fingerprint, str) and fingerprint != 'no-nvidia-smi'
+            and not details.get('cuda')):
+        return None
     return conda, prefix, details.copy()
 
 
@@ -564,7 +586,9 @@ class EnvironmentManager:
         plan = torch_install_plan(nvidia[1], gpu_cc) if nvidia else {
             'wheel': None, 'torch': None, 'torchvision': None, 'legacy': False}
         gpu_wheel = plan['wheel']
-        needs_cuda = bool(nvidia and gpu_wheel)
+        # GPU detected => NEVER silently accept a CPU-only environment,
+        # including when nvidia-smi does not report 'CUDA Version'.
+        needs_cuda = bool(nvidia)
         if nvidia:
             self.report('log', f'NVIDIA GPU 0: {nvidia[0]}')
             self.report('log', 'Driver maximum CUDA version: ' +
@@ -575,8 +599,9 @@ class EnvironmentManager:
                 self.report('log', f'Pascal/legacy GPU: pinning torch '
                             f'{plan["torch"]} + torchvision {plan["torchvision"]} '
                             f'({gpu_wheel}) to retain sm_61/sm_70 kernels.')
-            if not needs_cuda:
-                self.report("log", "Driver CUDA version unsupported/unknown: GPU setup is unavailable; using CPU-compatible setup.")
+            if nvidia[1] is None:
+                self.report("log", f"Driver CUDA version not reported; will check existing CUDA environments "
+                            f"and use a {gpu_wheel} GPU wheel if installation is required.")
         else:
             self.report("log", "No NVIDIA driver detected: CPU-compatible setup.")
         envs = list_envs(conda)
