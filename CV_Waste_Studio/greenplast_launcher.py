@@ -39,7 +39,7 @@ BORDER = "#DAE2EF"
 SUCCESS = "#1C8058"
 DANGER = "#B53A43"
 PAGE_TEXT = {
-    "train": ("Split & train", "Build no-copy dataset splits, then train or fine-tune a YOLO model."),
+    "train": ("Datasets & training", "Create splits or train directly from an existing YOLO dataset."),
     "audit": ("Annotation audit", "Identify inconsistent labels and export review-ready CSV findings."),
     "recall": ("Precision / recall", "Evaluate recall at your required precision using reusable inference results."),
     "system": ("Environment & setup", "Verify the Conda environment, inspect GPU support and access logs."),
@@ -139,7 +139,7 @@ class Studio:
                  font=("Segoe UI", 10), anchor="w").pack(fill="x", padx=24, pady=(2, 28))
         tk.Frame(sidebar, height=1, bg="#293A52").pack(fill="x", padx=19, pady=(0, 18))
         nav_items = (
-            ("train", "01", "Split & train"),
+            ("train", "01", "Datasets & training"),
             ("audit", "02", "Annotation audit"),
             ("recall", "03", "Precision / recall"),
         )
@@ -454,7 +454,7 @@ class Studio:
             self.pages.update(train=train, audit=audit, recall=recall)
             train_controls = ttk.Frame(train, padding=(20, 12, 20, 0))
             train_controls.pack(fill="x")
-            self.train_state = tk.StringVar(value="Ready to create splits or train")
+            self.train_state = tk.StringVar(value="Ready · split datasets or train existing YOLO splits")
             ttk.Label(train_controls, textvariable=self.train_state,
                       style="Muted.TLabel").pack(side="left")
             self.stop_button = ttk.Button(train_controls, text="Stop running job",
@@ -477,7 +477,7 @@ class Studio:
             return
         self.ready = True
         self._show("train")
-        self.log_line("train", "Ready. Add dataset folders and choose a split or training run.")
+        self.log_line("train", "Ready. Select Split + train, Split only, or Train existing split.")
         self.log_line("audit", "Ready. The audit reads annotations without modifying them.")
         self.log_line("recall", "Ready. Cached predictions can be reused for new precision thresholds.")
 
@@ -506,7 +506,8 @@ class Studio:
                           "pending": "", "stopping": False}
         self.train_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.train_state.set("Running " + ("split + training" if settings["train_after_split"] else "split only"))
+        self.train_state.set("Running " + ("existing dataset training" if settings.get("existing_data_yaml") else
+                                          "split + training" if settings["train_after_split"] else "split only"))
         self.log_line("train", "Started job " + str(proc.pid) + " · " + str(logfile))
         self.log_line("train", "Settings saved to " + str(config))
 

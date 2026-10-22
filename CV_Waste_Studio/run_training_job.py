@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Headless split/train worker for the unified desktop UI.
+"""Headless split/train/existing-dataset worker for the unified desktop UI.
 
 Running YOLO outside the Tk event loop keeps the same backend implementation,
 retains the entire output in a file and keeps the interface responsive.
@@ -19,7 +19,7 @@ def main(argv=None):
     if not isinstance(config, dict):
         raise ValueError("Training job settings must be a JSON object")
     from train_and_split_tool_GUI import autosplit_and_train_model
-    print("CV Waste Studio — split/training job", flush=True)
+    print("CV Waste Studio — dataset/training job", flush=True)
     autosplit_and_train_model(**config)
     print("JOB COMPLETE", flush=True)
 

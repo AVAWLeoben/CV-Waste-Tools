@@ -506,6 +506,12 @@ def _autosplit_source_paths(dataset_paths):
         path = Path(os.path.expanduser(text)).resolve()
         if not path.is_dir():
             raise NotADirectoryError(f"Dataset folder not found: {path}")
+        # images/ and labels/ are two halves of one YOLO source, not two
+        # independent datasets. Normalize either selection to their parent.
+        if (path.name.lower() in ("images", "labels")
+                and (path.parent / "images").is_dir()
+                and (path.parent / "labels").is_dir()):
+            path = path.parent
         if path not in seen:
             result.append(path)
             seen.add(path)
@@ -952,6 +958,71 @@ def autosplit_dataset(dataset_path=None, weights=(0.8, 0.2, 0.0),
     }
 
 
+def resolve_existing_dataset_yaml(selection):
+    """Validate a pre-split YOLO dataset configuration without modifying it.
+
+    Accepts an explicit YAML filename or a directory with data.yaml,
+    dataset.yaml or autosplit_data.yaml. Ultralytics remains responsible
+    for checking whether all referenced image data can be loaded.
+    """
+    from pathlib import Path
+    import yaml
+
+    raw = str(selection or "").strip().strip('"')
+    if not raw:
+        raise ValueError("Select an existing dataset YAML or its containing folder.")
+    path = Path(raw).expanduser().resolve()
+    if path.is_dir():
+        candidates = [path / name for name in (
+            "data.yaml", "dataset.yaml", "autosplit_data.yaml", "data.yml",
+        )]
+        found = [candidate for candidate in candidates if candidate.is_file()]
+        if len(found) == 0:
+            raise FileNotFoundError(
+                f"No data.yaml, dataset.yaml or autosplit_data.yaml found in {path}. "
+                "Select a YOLO dataset YAML with train, val and names entries."
+            )
+        path = found[0]
+    if not path.is_file() or path.suffix.lower() not in (".yaml", ".yml"):
+        raise FileNotFoundError(f"Existing dataset YAML not found: {path}")
+    try:
+        contents = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid dataset YAML ({path.name}): {exc}") from exc
+    if not isinstance(contents, dict):
+        raise ValueError("Dataset YAML must contain a mapping of YOLO configuration fields.")
+    for part in ("train", "val"):
+        selected = contents.get(part)
+        if not selected or not isinstance(selected, (str, list)) or (isinstance(selected, list) and (
+                not selected or not all(isinstance(value, str) and value.strip() for value in selected))):
+            raise ValueError(f"Existing dataset YAML needs a non-empty '{part}' entry.")
+    names = contents.get("names")
+    nc = contents.get("nc")
+    if isinstance(names, list):
+        if not names or not all(isinstance(n, str) and n.strip() for n in names):
+            raise ValueError("Dataset 'names' must contain non-empty class names.")
+        class_count = len(names)
+    elif isinstance(names, dict):
+        if not names or not all(str(n).strip() for n in names.values()):
+            raise ValueError("Dataset 'names' must contain non-empty class names.")
+        try:
+            ids = sorted(int(k) for k in names)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Dataset class-name IDs must be integers.") from exc
+        if ids != list(range(len(ids))):
+            raise ValueError("Dataset class-name IDs must begin at 0 and be consecutive.")
+        class_count = len(names)
+    elif isinstance(nc, int) and nc > 0:
+        # YOLO supports nc-only configurations in certain versions, but
+        # names are preferable for readable evaluation results.
+        class_count = nc
+    else:
+        raise ValueError("Dataset YAML needs 'names' (list or ID mapping) or a valid 'nc'.")
+    return {"yaml": str(path), "classes": class_count,
+            "train": contents["train"], "val": contents["val"],
+            "test": contents.get("test")}
+
+
 # --- ALL-IN-ONE MULTI-DATASET SPLIT + TRAIN (NO IMAGE/LABEL COPYING) ---
 def _all_in_one_gui(parent=None, on_submit=None):
     """Build the original split/train form in a standalone window or embedded page.
@@ -982,15 +1053,69 @@ def _all_in_one_gui(parent=None, on_submit=None):
         ttk.Label(main, text="Combine datasets using path lists. No images or labels are copied.",
                   foreground="#555555").pack(anchor="w", pady=(0, 14))
 
-    # Keep the split-only switch visible regardless of the active tab.
-    do_train = tk.BooleanVar(value=True)
+    # These are independent operations. Existing-split training does not call
+    # autosplit or write to the selected dataset directory.
+    operation = tk.StringVar(value="split_train")
     mode_bar = ttk.Frame(main)
     mode_bar.pack(fill="x", pady=(0, 10))
-    ttk.Label(mode_bar, text="After creating split lists:").pack(side="left", padx=(0, 12))
-    ttk.Radiobutton(mode_bar, text="Train model", variable=do_train,
-                    value=True).pack(side="left", padx=(0, 12))
-    ttk.Radiobutton(mode_bar, text="Splits only", variable=do_train,
-                    value=False).pack(side="left")
+    ttk.Label(mode_bar, text="Workflow:", font=("Segoe UI", 10, "bold")).pack(
+        side="left", padx=(0, 14))
+    for label, value in (("Split + train", "split_train"),
+                         ("Split only", "split_only"),
+                         ("Train existing split", "train_existing")):
+        ttk.Radiobutton(mode_bar, text=label, variable=operation,
+                        value=value).pack(side="left", padx=(0, 15))
+
+    existing_frame = ttk.Frame(main, padding=(12, 12))
+    existing_frame.columnconfigure(1, weight=1)
+    ttk.Label(existing_frame, text="Existing YOLO dataset").grid(
+        row=0, column=0, sticky="w", padx=(0, 12), pady=3)
+    existing_yaml = tk.StringVar()
+    existing_entry = ttk.Entry(existing_frame, textvariable=existing_yaml)
+    existing_entry.grid(row=0, column=1, sticky="ew", pady=3)
+    existing_preview = tk.StringVar(value="Select data.yaml, autosplit_data.yaml, or a folder containing one.")
+    ttk.Label(existing_frame, textvariable=existing_preview, foreground="#60718A",
+              wraplength=730).grid(row=1, column=0, columnspan=3, sticky="w", pady=(5, 0))
+
+    def check_existing_yaml(show_error=True):
+        try:
+            info = resolve_existing_dataset_yaml(existing_yaml.get())
+            existing_yaml.set(info["yaml"])
+            existing_preview.set(f"YAML metadata valid · {info['classes']} classes · "
+                                 "train and val defined · file paths checked at training start")
+            if not results_custom:
+                results_folder.set(str(Path(info["yaml"]).parent / "training_runs"))
+            return info
+        except (OSError, ValueError) as exc:
+            existing_preview.set(str(exc))
+            if show_error:
+                messagebox.showerror("Existing dataset", str(exc), parent=root)
+            return None
+
+    def browse_existing_yaml():
+        path = filedialog.askopenfilename(
+            parent=root, title="Choose existing YOLO dataset configuration",
+            filetypes=[("YOLO YAML", "*.yaml *.yml"), ("All files", "*.*")])
+        if path:
+            existing_yaml.set(path)
+            check_existing_yaml(False)
+
+    def browse_existing_folder():
+        selected = filedialog.askdirectory(parent=root,
+            title="Choose existing YOLO split folder (contains data.yaml)",
+            mustexist=True)
+        if selected:
+            existing_yaml.set(selected)
+            check_existing_yaml(False)
+
+    ttk.Button(existing_frame, text="Browse YAML…", command=browse_existing_yaml).grid(
+        row=0, column=2, padx=(12, 0))
+    existing_actions = ttk.Frame(existing_frame)
+    existing_actions.grid(row=2, column=1, sticky="w", pady=(7, 0))
+    ttk.Button(existing_actions, text="Browse split folder…",
+               command=browse_existing_folder).pack(side="left", padx=(0, 10))
+    ttk.Button(existing_actions, text="Check dataset",
+               command=check_existing_yaml).pack(side="left")
     # Reserve the bottom command row before packing the expandable notebook.
     buttons = ttk.Frame(main)
     buttons.pack(side="bottom", fill="x", pady=(12, 0))
@@ -1098,11 +1223,11 @@ def _all_in_one_gui(parent=None, on_submit=None):
     def add_source():
         initial = str(Path(sources[-1]).parent) if sources else str(Path.home())
         selected = _select_multiple_directories(root, initial, "Select dataset folders")
-        for path in selected:
-            path = str(Path(path).resolve())
-            if path not in sources:
-                sources.append(path)
-                folders.insert(tk.END, path)
+        for path in _autosplit_source_paths(selected):
+            normalized = str(path)
+            if normalized not in sources:
+                sources.append(normalized)
+                folders.insert(tk.END, normalized)
         if selected:
             fill_defaults()
 
@@ -1262,31 +1387,47 @@ def _all_in_one_gui(parent=None, on_submit=None):
     chosen_settings = {}
 
     def submit():
+        mode = operation.get()
+        existing_info = None
         try:
-            if not sources:
-                raise ValueError("Add at least one source dataset folder.")
-            weights = [float(x.get().strip().replace(",", ".")) for x in percentages]
-            if (not all(math.isfinite(w) and 0 <= w <= 100 for w in weights)
-                    or abs(sum(weights) - 100) > 0.01 or weights[0] <= 0):
-                raise ValueError("Split percentages must add up to 100 (train > 0%).")
-            if do_train.get() and weights[1] <= 0:
-                raise ValueError("Validation percentage must be above zero for training.")
-            out = split_output.get().strip().strip('"')
-            if not out:
-                raise ValueError("Choose a split output folder.")
-            out = Path(out).expanduser().resolve()
-            if out.exists() and not out.is_dir():
-                raise ValueError("Split output destination is not a folder.")
-            names = [n.strip() for n in class_names.get().split(",")] if class_names.get().strip() else None
-            if names is not None and (not all(names) or len(names) != len(set(names))):
-                raise ValueError("Class names must be nonempty and unique.")
-            values = {
-                "dataset_paths": sources[:], "output_dir": out,
-                "weights": tuple(w / 100 for w in weights),
-                "ignore_empty_images": ignore_empty.get(),
-                "class_names": names, "train_after_split": do_train.get(),
-            }
-            if do_train.get():
+            if mode == "train_existing":
+                existing_info = check_existing_yaml(show_error=False)
+                if existing_info is None:
+                    raise ValueError(existing_preview.get())
+                # Sentinel: an existing split has neither source folders nor
+                # new split percentages. Never overwrite existing manifests.
+                values = {
+                    "existing_data_yaml": existing_info["yaml"],
+                    "train_after_split": True,
+                    "dataset_paths": None,
+                }
+                default_project = str(Path(existing_info["yaml"]).parent / "training_runs")
+            else:
+                if not sources:
+                    raise ValueError("Add at least one source dataset folder.")
+                weights = [float(x.get().strip().replace(",", ".")) for x in percentages]
+                if (not all(math.isfinite(w) and 0 <= w <= 100 for w in weights)
+                        or abs(sum(weights) - 100) > 0.01 or weights[0] <= 0):
+                    raise ValueError("Split percentages must add up to 100 (train > 0%).")
+                if mode == "split_train" and weights[1] <= 0:
+                    raise ValueError("Validation percentage must be above zero for training.")
+                out = split_output.get().strip().strip('"')
+                if not out:
+                    raise ValueError("Choose a split output folder.")
+                out = Path(out).expanduser().resolve()
+                if out.exists() and not out.is_dir():
+                    raise ValueError("Split output destination is not a folder.")
+                names = [n.strip() for n in class_names.get().split(",")] if class_names.get().strip() else None
+                if names is not None and (not all(names) or len(names) != len(set(names))):
+                    raise ValueError("Class names must be nonempty and unique.")
+                values = {
+                    "dataset_paths": sources[:], "output_dir": out,
+                    "weights": tuple(w / 100 for w in weights),
+                    "ignore_empty_images": ignore_empty.get(),
+                    "class_names": names, "train_after_split": mode == "split_train",
+                }
+                default_project = str(out / "training_runs")
+            if mode != "split_only":
                 model_weights = custom_weights.get().strip().strip('"')
                 if model_weights and not Path(model_weights).expanduser().is_file():
                     raise ValueError(f"Weights file not found: {model_weights}")
@@ -1308,7 +1449,10 @@ def _all_in_one_gui(parent=None, on_submit=None):
                     epochs = int(duration_text)
                     if epochs <= 0:
                         raise ValueError("Training epochs must be positive.")
-                project_path = results_folder.get().strip().strip('"') or str(out / "training_runs")
+                results = results_folder.get().strip().strip('"')
+                if not results_custom and mode == "train_existing":
+                    results = default_project
+                project_path = results or default_project
                 values.update({
                     "version": version.get(), "size": size.get(),
                     "model_path": model_weights or None, "epochs": epochs,
@@ -1319,13 +1463,14 @@ def _all_in_one_gui(parent=None, on_submit=None):
                     "project": project_path, "run_name": run_name.get().strip() or "train",
                     "compact_progress": compact_progress.get(),
                 })
-            existing = [str(out / p) for p in ("train.txt", "val.txt", "test.txt", "autosplit_data.yaml")
-                        if (out / p).exists()]
-            if existing and not messagebox.askyesno(
-                "Overwrite split files", "Replace these files?\n\n" + "\n".join(existing),
-                parent=root,
-            ):
-                return
+            if mode != "train_existing":
+                existing = [str(out / p) for p in ("train.txt", "val.txt", "test.txt", "autosplit_data.yaml")
+                            if (out / p).exists()]
+                if existing and not messagebox.askyesno(
+                    "Overwrite split files", "Replace these files?\n\n" + "\n".join(existing),
+                    parent=root,
+                ):
+                    return
         except (ValueError, TypeError, OSError) as exc:
             messagebox.showerror("Invalid settings", str(exc), parent=root)
             return
@@ -1341,14 +1486,27 @@ def _all_in_one_gui(parent=None, on_submit=None):
     launch_button.pack(side="right", padx=(0, 12))
 
     def update_launch(*_args):
-        enabled = do_train.get()
-        notebook.tab(train_page, state="normal" if enabled else "disabled")
-        if not enabled and notebook.select() == str(train_page):
-            notebook.select(split_page)
-        launch_button.configure(text="Create splits + train" if enabled
-                                else "Create split lists")
+        mode = operation.get()
+        is_training = mode != "split_only"
+        is_existing = mode == "train_existing"
+        notebook.tab(train_page, state="normal" if is_training else "disabled")
+        notebook.tab(split_page, state="disabled" if is_existing else "normal")
+        if is_existing:
+            existing_frame.pack(fill="x", pady=(0, 8), after=mode_bar)
+            notebook.select(train_page)
+        else:
+            existing_frame.pack_forget()
+            if not results_custom and sources:
+                fill_defaults()
+            if not is_training or notebook.select() == str(train_page):
+                notebook.select(split_page)
+        launch_button.configure(text={
+            "split_train": "Create splits + train",
+            "split_only": "Create split lists",
+            "train_existing": "Train existing dataset",
+        }[mode])
 
-    do_train.trace_add("write", update_launch)
+    operation.trace_add("write", update_launch)
     update_launch()
     if embedded:
         return main, launch_button
@@ -1416,24 +1574,32 @@ def autosplit_and_train_model(
     version="11", size="l", model_path=None, epochs=100, time=None,
     batch=4, imgsz=640, device="auto", auto_install_cuda=False,
     project=None, run_name="train", compact_progress=True, cls_weight=0.5,
+    existing_data_yaml=None,
 ):
-    """Combine original image paths from several datasets into split lists and train.
+    """Create YOLO split lists, split and train, or train an existing split.
 
-    With no dataset_paths: display the integrated GUI. When dataset_paths is
-    passed, run without prompting. Source files are never copied or moved.
+    Pass existing_data_yaml (path to data.yaml, autosplit_data.yaml, or a
+    containing directory) to skip splitting entirely. In existing mode, no
+    source dataset YAML, image, label, or split manifest is changed.
     """
     import math
     from pathlib import Path
 
-    if dataset_paths is None:
+    existing_mode = existing_data_yaml is not None
+    if dataset_paths is None and not existing_mode:
         settings = _all_in_one_gui()
         if settings is None:
             print("Cancelled: no split or training started.")
             return None
         return autosplit_and_train_model(**settings)
-    weights = tuple(float(w) for w in weights)
-    if train_after_split and len(weights) == 3 and weights[1] <= 0:
-        raise ValueError("Training requires a validation split above zero.")
+    if existing_mode and dataset_paths:
+        raise ValueError("Choose either existing_data_yaml or source folders, not both.")
+    if existing_mode and not train_after_split:
+        raise ValueError("Existing-dataset mode is training only; use split-only for new splits.")
+    if not existing_mode:
+        weights = tuple(float(w) for w in weights)
+        if train_after_split and len(weights) == 3 and weights[1] <= 0:
+            raise ValueError("Training requires a validation split above zero.")
     if train_after_split:
         batch = int(batch)
         imgsz = int(imgsz)
@@ -1453,38 +1619,54 @@ def autosplit_and_train_model(
         if model_path and not Path(model_file).is_file():
             raise FileNotFoundError(f"YOLO weights not found: {model_file}")
 
-    split_result = autosplit_dataset(
-        dataset_paths=dataset_paths, output_dir=output_dir,
-        weights=weights, ignore_empty_images=ignore_empty_images,
-    )
-    if split_result is None:
-        return None
     import yaml
-    yaml_file = Path(split_result["yaml"])
-    config = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
-    if isinstance(class_names, str):
-        class_names = [n.strip() for n in class_names.split(",")]
-    if class_names is not None:
-        class_names = [str(n).strip() for n in class_names]
-        if not class_names or any(not n for n in class_names) or len(set(class_names)) != len(class_names):
-            raise ValueError("Class names must be nonempty and unique.")
-        if len(class_names) < len(config["names"]):
-            raise ValueError(f"Detected {len(config['names'])} class IDs, but received "
-                             f"only {len(class_names)} names. Update autosplit_data.yaml.")
-        config["names"] = {i: n for i, n in enumerate(class_names)}
-        yaml_file.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
-                             encoding="utf-8")
-        print(f"Using {len(class_names)} user-specified class names.")
+    if existing_mode:
+        details = resolve_existing_dataset_yaml(existing_data_yaml)
+        yaml_file = Path(details["yaml"])
+        config = yaml.safe_load(yaml_file.read_text(encoding="utf-8-sig"))
+        if class_names is not None:
+            raise ValueError("Edit class names in your original dataset YAML, "
+                             "not through training settings.")
+        split_result = None
+        print(f"Using existing dataset split: {yaml_file}")
+        print(f"Validated YAML metadata: {details['classes']} classes, train and val defined")
+        print("Split generation SKIPPED; existing dataset and split files are read-only.")
+    else:
+        split_result = autosplit_dataset(
+            dataset_paths=dataset_paths, output_dir=output_dir,
+            weights=weights, ignore_empty_images=ignore_empty_images,
+        )
+        if split_result is None:
+            return None
+        yaml_file = Path(split_result["yaml"])
+        config = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
+        if isinstance(class_names, str):
+            class_names = [n.strip() for n in class_names.split(",")]
+        if class_names is not None:
+            class_names = [str(n).strip() for n in class_names]
+            if not class_names or any(not n for n in class_names) or len(set(class_names)) != len(class_names):
+                raise ValueError("Class names must be nonempty and unique.")
+            if len(class_names) < len(config["names"]):
+                raise ValueError(f"Detected {len(config['names'])} class IDs, but received "
+                                 f"only {len(class_names)} names. Update autosplit_data.yaml.")
+            config["names"] = {i: n for i, n in enumerate(class_names)}
+            yaml_file.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
+                                 encoding="utf-8")
+            print(f"Using {len(class_names)} user-specified class names.")
 
-    if not train_after_split:
-        print("Split lists created; training was disabled.")
-        return {"split": split_result, "training": None}
-    if split_result["counts"]["val"] <= 0:
-        raise ValueError("No validation images after filtering. Training did not start. "
-                         "Increase validation % or add more labeled images. "
-                         f"The lists remain at {split_result['output_dir']}")
-    if all(str(n).startswith("class_") for n in config["names"].values()):
-        print("WARNING: Class names are placeholders. Check autosplit_data.yaml "
+        if not train_after_split:
+            print("Split lists created; training was disabled.")
+            return {"split": split_result, "training": None}
+        if split_result["counts"]["val"] <= 0:
+            raise ValueError("No validation images after filtering. Training did not start. "
+                             "Increase validation % or add more labeled images. "
+                             f"The lists remain at {split_result['output_dir']}")
+
+    names = config.get("names", {})
+    if isinstance(names, (dict, list)) and names and all(
+            str(n).startswith("class_") for n in (
+                names.values() if isinstance(names, dict) else names)):
+        print("WARNING: Class names are placeholders. Check the dataset YAML "
               "for the correct names/IDs.")
 
     # Reuse the existing CUDA/CPU handling and optional dependency installer.
@@ -1496,7 +1678,8 @@ def autosplit_and_train_model(
     selected_device = _select_training_device(device, torch)
 
     project_dir = (Path(project).expanduser().resolve() if project else
-                   Path(split_result["output_dir"]) / "training_runs")
+                   (yaml_file.parent if existing_mode else
+                    Path(split_result["output_dir"])) / "training_runs")
     project_dir.mkdir(parents=True, exist_ok=True)
     kwargs = {
         "data": str(yaml_file), "imgsz": imgsz, "batch": batch,
@@ -1507,11 +1690,14 @@ def autosplit_and_train_model(
         kwargs["time"] = time
     else:
         kwargs["epochs"] = epochs
-    print(f"Training {model_file} on {sum(split_result['counts'].values())} images")
+    if existing_mode:
+        print(f"Training {model_file} on existing train/val split (no resplitting)")
+    else:
+        print(f"Training {model_file} on {sum(split_result['counts'].values())} images")
     print(f"Data: {yaml_file} | device: {selected_device} | image size: {imgsz} | cls: {cls_weight:g}")
     trained = _train_with_compact_progress(YOLO(model_file), kwargs, compact_progress)
     print(f"Training finished. Results saved in: {project_dir}")
-    return {"split": split_result, "training": trained}
+    return {"split": split_result, "training": trained, "dataset_yaml": str(yaml_file)}
 
 
 if __name__ == "__main__":

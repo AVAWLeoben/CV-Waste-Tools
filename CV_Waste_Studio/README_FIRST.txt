@@ -6,18 +6,24 @@ one desktop application. Select a tool from the left sidebar; its settings
 remain available when you switch tools. The bottom activity console displays
 messages for the currently selected tool, and can be hidden or cleared.
 
-THE THREE EXISTING WORKFLOWS ARE RETAINED
+THE THREE TOOLS ARE RETAINED
 -----------------------------------------
 
-01  SPLIT & TRAIN
+01  DATASETS & TRAINING
     - Use multiple source dataset folders (mixed images/labels or YOLO layouts).
     - Produce train/val/test path lists, with configurable percentages.
     - Optionally filter images with empty annotations.
     - Optionally override YOLO class names.
-    - Run split-only or train/fine-tune a YOLO 8 / 11 / 26 model.
+    - Choose one of three independent workflows: Split + train, Split only,
+      or Train existing split (no re-splitting).
+    - For Train existing split, browse to a YOLO data.yaml / dataset.yaml /
+      autosplit_data.yaml or its containing folder. Train/val and class names
+      must be defined. The selected YAML is validated but never changed.
+    - Train/fine-tune a YOLO 8 / 11 / 26 model with the same training options.
     - Existing training settings: model size, custom weights, duration in
       epochs/hours, batch, image size, CLS loss weight, device, output and name.
     - Files are referenced by paths, not copied or moved.
+    - Selecting sibling images/ and labels/ folders treats them as one dataset.
     - Splitting/training runs in a background *process*, not another window;
       the UI remains responsive. Stop running job is available in this view.
       Training output is saved to a complete timestamped file in logs/.
@@ -39,6 +45,7 @@ THE THREE EXISTING WORKFLOWS ARE RETAINED
     - Writes detailed operating-point summaries and optional plots.
 
 The processing functions in the original Python modules are retained.
+Training from existing splits bypasses the splitter entirely.
 The old standalone entry points are also included for compatibility, but
 normal startup uses only the new single-window CV Waste Studio.
 
@@ -51,7 +58,7 @@ WINDOWS QUICK START
 4. Initial startup may install/recheck the Conda environment. The initial
    setup screen is then replaced by the main Studio interface automatically.
    It is not a second tool window and does not require user interaction.
-5. Choose Split & train, Annotation audit or Precision / recall in the sidebar.
+5. Choose Datasets & training, Annotation audit or Precision / recall in the sidebar.
 
 LINUX DESKTOP QUICK START
 -------------------------
@@ -118,3 +125,30 @@ threads using the original implementations.
 When developing without an installed Ultralytics/PyTorch environment, the
 GUI can be smoke-tested with mocked environment details, but actual inference
 and training require the full packages and a suitable model/dataset.
+
+TRAINING AN EXISTING SPLIT WITHOUT CREATING NEW SPLITS
+----------------------------------------------------
+1. In Datasets & training, choose "Train existing split" at the top.
+2. Browse to your existing YOLO dataset YAML (or enter its containing folder).
+   A standard dataset typically has these keys:
+
+      path: D:/datasets/my_dataset
+      train: images/train
+      val: images/val
+      test: images/test       # optional
+      names: [class_one, class_two]
+
+   Alternatively, 'train' and 'val' can point to text manifests of images.
+   Existing CV Waste Studio splits have an autosplit_data.yaml file.
+3. Click "Check dataset" to verify required YAML keys and class names.
+   File availability and annotation validity are fully checked by Ultralytics
+   when training begins; Check dataset is intentionally a lightweight check.
+4. Set the model/weights, epochs, batch, image size, CLS weight, device, results
+   folder, and run name in "2. Model & training".
+5. Click "Train existing dataset". No split generation runs. The input YAML,
+   split lists, image files and labels are not rewritten by this workflow.
+   Training outputs go to the selected results folder.
+
+If you have separate images/ and labels/ directories but no train/val split,
+use Split + train. If you already split images into train/val/test but have
+no YAML, add a standard Ultralytics data.yaml first.

@@ -31,3 +31,10 @@ Not tested here
 - Image dataset audits or cached precision/recall on your real checkpoints.
 
 See README_FIRST.txt for setup and operating instructions.
+
+Update: independent existing-dataset training
+- Added a third workflow to bypass split generation and train on an existing
+  Ultralytics data.yaml or autosplit_data.yaml, preserving split contents.
+- Added lightweight preflight YAML validation and a dataset picker.
+- Source selection now recognises images/ and labels/ as one paired dataset.
+- The worker still runs headlessly with all existing training controls.
