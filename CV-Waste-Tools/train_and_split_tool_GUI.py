@@ -161,8 +161,8 @@ def _ensure_gpu_pytorch(device, auto_install_cuda):
     else:
         print("PyTorch is missing or could not be loaded: " + existing.get("error", "unknown"))
 
-    # Auto is deliberately CPU-first for students. Only an explicit GPU
-    # selection can trigger a CUDA installation or a GPU requirement.
+    # Auto now prefers GPU when available, but does not reinstall PyTorch
+    # inside a tool process. Environment setup belongs to the launcher.
     if preference in ("auto", "cpu") or existing.get("GPU_AVAILABLE") == "True":
         return
 
@@ -243,14 +243,28 @@ def _ensure_gpu_pytorch(device, auto_install_cuda):
 
 
 def _select_training_device(device, torch):
-    """Use CPU by default. Require an explicit selection to train on GPU 0."""
+    """Prefer GPU 0 for Auto, allow CPU only when requested/no NVIDIA is detected."""
     preference = _normalize_device_choice(device)
     available = bool(torch.cuda.is_available())
     print(f"Active PyTorch version: {torch.__version__}")
     print(f"Active CUDA build: {torch.version.cuda or 'not installed'}")
     print(f"GPU visible to PyTorch: {'Yes' if available else 'No'}")
     if preference == "auto":
-        print("Selected training device: CPU (student-friendly automatic default).")
+        if available:
+            gpu = torch.cuda.get_device_name(0)
+            try:
+                assert torch.ones(2, device="cuda:0").sum().item() == 2
+            except Exception as exc:
+                raise RuntimeError(f"CUDA was detected, but cannot execute on {gpu}: {exc}") from exc
+            print(f"Selected training device: GPU 0 ({gpu}) [automatic].")
+            return 0
+        # Do not hide an accidentally selected CPU-only Conda environment.
+        if _nvidia_gpu_info() is not None:
+            raise RuntimeError(
+                "NVIDIA GPU is present but PyTorch cannot access CUDA. "
+                "Recheck/repair the CV Waste Tools environment, or choose CPU explicitly."
+            )
+        print("Selected training device: CPU (no NVIDIA GPU available).")
         return "cpu"
     if preference == "cpu":
         print("Selected training device: CPU (requested explicitly).")
@@ -1166,7 +1180,7 @@ def _all_in_one_gui():
     ttk.Label(train_tab, text="Default 0.5; higher values prioritize classification loss.",
               foreground="#555555").grid(row=8, column=2, sticky="w", padx=(8, 0))
     field("Training device", 9)
-    choices = {"auto": "Auto (CPU default)", "cpu": "CPU", "gpu": "GPU 0 (CUDA)"}
+    choices = {"auto": "Auto (prefer GPU)", "cpu": "CPU", "gpu": "GPU 0 (CUDA)"}
     device = tk.StringVar(value=choices["auto"])
     ttk.Combobox(train_tab, textvariable=device, values=tuple(choices.values()),
                  width=25, state="readonly").grid(row=9, column=1, sticky="w", pady=8)

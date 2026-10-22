@@ -21,6 +21,8 @@ from pathlib import Path
 import queue
 import re
 import tempfile
+import shutil
+import subprocess
 import threading
 import time
 import traceback
@@ -136,14 +138,81 @@ def read_yolo_annotations(label_path: Path, format_counts=None):
             np.asarray(classes, dtype=int), "VALID", invalid_rows)
 
 
+def select_inference_device(requested: str, emit) -> str:
+    """Prefer real CUDA for Auto, and never silently use CPU on an NVIDIA host."""
+    import torch
+
+    requested = str(requested).strip()
+    if requested == "CPU":
+        emit(("log", "Inference device: CPU (explicit selection)."))
+        return "cpu"
+
+    if torch.cuda.is_available():
+        try:
+            # Verify that installed PyTorch kernels actually run on this GPU.
+            gpu_name = torch.cuda.get_device_name(0)
+            check = torch.ones(2, device="cuda:0").sum().item()
+            if check != 2.0:
+                raise RuntimeError("CUDA tensor computation did not return the expected result")
+        except Exception as exc:
+            raise RuntimeError(
+                f"CUDA hardware was found, but the installed PyTorch cannot compute on it: {exc}. "
+                "Recheck/repair the environment in the CV Waste Tools launcher."
+            ) from exc
+        emit(("log", f"Inference device: GPU 0 ({gpu_name})"))
+        return "0"
+
+    # If NVIDIA hardware is visible, treat a CPU-only PyTorch install as an
+    # environment problem, even when the user selected Auto.
+    smi = shutil.which("nvidia-smi")
+    if smi:
+        try:
+            probe = subprocess.run(
+                [smi, "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=8, check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if probe.returncode == 0 and probe.stdout.strip():
+                raise RuntimeError(
+                    f"NVIDIA GPU detected ({probe.stdout.splitlines()[0].strip()}), "
+                    "but this Conda environment has no usable CUDA-enabled PyTorch. "
+                    "Use 'Recheck / repair environment' in the launcher, then rerun the audit. "
+                    "To use the CPU intentionally, select CPU in the audit GUI."
+                )
+        except subprocess.TimeoutExpired:
+            pass
+    if requested == "GPU 0":
+        raise RuntimeError(
+            "GPU 0 was requested, but PyTorch reports CUDA unavailable. "
+            "Recheck the launcher environment and GPU driver."
+        )
+    emit(("log", "No usable NVIDIA CUDA GPU found. Inference device: CPU (Auto)."))
+    return "cpu"
+
+
+def build_source_manifest(paths: list[Path], directory: Path) -> Path:
+    """Write paths for Ultralytics LoadImagesAndVideos, avoiding eager list loading.
+
+    A Python list handed to model.predict() may load every image as one batch,
+    ignoring the batch option. A text manifest uses the proper batched loader.
+    """
+    target = directory / "audit_images.txt"
+    target.write_text("".join(f"{p.resolve()}\n" for p in paths), encoding="utf-8")
+    return target
+
+
 def audit_dataset(model_path, image_dir, label_dir, output_dir,
                   conf_threshold, iou_threshold, allow_low_coverage,
-                  cancel_event, emit):
-    """Audit labeled images only; never invent missing-label findings from absent GT.
+                  cancel_event, emit, imgsz=1280, batch_size=8, device="Auto (prefer GPU)"):
+    """Audit labeled top-level images via ONE batched Ultralytics predictor.
 
-    Without explicit override, reject low annotation coverage before loading YOLO.
-    Emits the original web-compatible CSV schema.
+    The model is loaded once, and model.predict() is called once with a
+    .txt manifest of only the eligible (labeled) top-level images. Ultralytics
+    then loads image batches from disk rather than starting a new predictor for
+    every file. Per-image CSV rows remain backward-compatible with CV Waste.
     """
+    from collections import Counter
+
     images = sorted(
         image_dir / filename
         for filename in os.listdir(image_dir)
@@ -154,8 +223,6 @@ def audit_dataset(model_path, image_dir, label_dir, output_dir,
     if not images:
         raise ValueError(f"No top-level .jpg/.jpeg/.png images in {image_dir}")
 
-    # Preflight: check the exact filenames and the actual content, not only folder existence.
-    from collections import Counter
     counts = Counter()
     examples = {}
     annotations = {}
@@ -174,7 +241,7 @@ def audit_dataset(model_path, image_dir, label_dir, output_dir,
         if status != "VALID" and status not in examples:
             examples[status] = str(label_path)
         if status == "VALID":
-            annotations[image_path] = (boxes, classes)
+            annotations[image_path.resolve()] = (boxes, classes)
 
     total = len(images)
     valid = counts["VALID"]
@@ -188,38 +255,34 @@ def audit_dataset(model_path, image_dir, label_dir, output_dir,
                  f"BBOX+confidence={format_counts['BBOX_CONF']}; "
                  f"segmentation polygons={format_counts['POLYGON']}."))
     if format_counts['BBOX_CONF']:
-        emit(("log", "NOTE: save_conf=True labels were recognized. "
-                     "Saved confidences are ignored during ground-truth matching; "
-                     "model-generated labels should still be manually verified."))
+        emit(("log", "NOTE: save_conf=True labels were recognized; saved confidences "
+                     "are ignored for geometry matching."))
     for status, path in examples.items():
         emit(("log", f"Example {status}: {path}"))
 
     if valid == 0:
         raise ValueError(
-            "No readable annotations were found. Verify the LABEL DIRECTORY and the "
-            "YOLO .txt filenames. The audit was stopped before inference."
+            "No readable annotations were found. Verify the LABEL DIRECTORY and YOLO filenames."
         )
     if coverage < 0.80 and not allow_low_coverage:
         raise ValueError(
             f"Only {valid}/{total} images ({coverage:.1%}) have readable annotations. "
             f"Missing files: {counts['MISSING_FILE']}; empty files: "
             f"{counts['EMPTY_FILE']}; invalid files: {counts['INVALID_FILE']}. "
-            "The selected label folder may be incorrect or annotations may have "
-            "another filename/format. No audit was run. If incomplete coverage is "
-            "intentional, check 'Allow low label coverage' to analyze only the "
-            "images that DO have readable ground truth."
+            "If excluded background images explain this, enable 'Skip unannotated/background images'."
         )
     skipped = total - valid
     if skipped:
-        emit(("log", f"Skipping {skipped} images without readable GT: they will "
-                     "NOT be reported as missing-object findings."))
-
+        emit(("log", f"Skipping {skipped} images without readable ground-truth labels."))
+    eligible_images = sorted(annotations)
+    emit(("images", valid))
     if cancel_event.is_set():
         emit(("cancelled",))
         return
 
     from ultralytics import YOLO
-    emit(("log", f"Loading model: {model_path}"))
+    selected_device = select_inference_device(device, emit)
+    emit(("log", f"Loading YOLO model: {model_path}"))
     model = YOLO(str(model_path))
     model_names = model.names
 
@@ -234,78 +297,103 @@ def audit_dataset(model_path, image_dir, label_dir, output_dir,
 
     findings = []
     started = time.perf_counter()
-    for image_no, image_path in enumerate(images, start=1):
-        if cancel_event.is_set():
-            emit(("cancelled",))
-            return
-        if image_path not in annotations:
-            emit(("progress", image_no, total, len(findings)))
-            continue
+    processed = set()
+    emit(("log", f"Starting one streaming batched prediction run: {valid} labeled images; "
+                 f"imgsz={imgsz}, batch={batch_size}, conf={conf_threshold:g}, "
+                 f"device={selected_device}."))
+    with tempfile.TemporaryDirectory(prefix="cvw_audit_manifest_") as tmp:
+        source = build_source_manifest(eligible_images, Path(tmp))
+        # Ultralytics handles the batch preprocessing, inference, and NMS.
+        # The .txt source is essential: unlike a Python list, it enforces batch_size.
+        stream = model.predict(
+            source=str(source), stream=True, batch=batch_size,
+            conf=conf_threshold, imgsz=imgsz, device=selected_device,
+            verbose=False, save=False,
+        )
+        try:
+            for result in stream:
+                if cancel_event.is_set():
+                    emit(("cancelled",))
+                    return
 
-        result = model.predict(
-            str(image_path), conf=conf_threshold, imgsz=1280, verbose=False
-        )[0]
-        height, width = result.orig_shape
-        gt_norm, gt_classes = annotations[image_path]
-        scale = np.array([width, height, width, height], dtype=float)
-        gt_boxes = gt_norm * scale
+                image_path = Path(result.path).resolve()
+                if image_path not in annotations:
+                    raise RuntimeError(
+                        f"Prediction returned an unexpected image: {image_path}. "
+                        "Aborting rather than associating boxes with the wrong ground truth."
+                    )
+                if image_path in processed:
+                    raise RuntimeError(f"Duplicate prediction result for {image_path}")
+                processed.add(image_path)
 
-        for pred_idx, pred in enumerate(result.boxes):
-            pred_box = pred.xyxy[0].cpu().numpy()
-            pred_cls = int(pred.cls[0].item())
-            confidence = float(pred.conf[0].item())
-            overlaps = box_iou(pred_box, gt_boxes)
-            best_gt_idx = int(np.argmax(overlaps))
-            best_iou = float(overlaps[best_gt_idx])
+                height, width = result.orig_shape
+                gt_norm, gt_classes = annotations[image_path]
+                scale = np.array([width, height, width, height], dtype=float)
+                gt_boxes = gt_norm * scale
 
-            gt_cls = -1
-            gt_box = None
-            if best_iou >= iou_threshold:
-                gt_cls = int(gt_classes[best_gt_idx])
-                gt_box = gt_boxes[best_gt_idx]
-                if pred_cls == gt_cls:
-                    continue
-                issue = "CLASS_MISMATCH"
-            elif best_iou > 0:
-                # There IS an annotation: review extent/position, not missing label.
-                gt_cls = int(gt_classes[best_gt_idx])
-                gt_box = gt_boxes[best_gt_idx]
-                issue = "MISSING_OR_BAD_BOX"
-            else:
-                # This is only a candidate missing object: image has other GT boxes.
-                # A high-confidence incorrect model detection can produce this too.
-                best_gt_idx = -1
-                issue = "POSSIBLE_MISSING_LABEL"
+                for pred_idx, pred in enumerate(result.boxes):
+                    pred_box = pred.xyxy[0].cpu().numpy()
+                    pred_cls = int(pred.cls[0].item())
+                    confidence = float(pred.conf[0].item())
+                    overlaps = box_iou(pred_box, gt_boxes)
+                    best_gt_idx = int(np.argmax(overlaps))
+                    best_iou = float(overlaps[best_gt_idx])
 
-            px1, py1, px2, py2 = normalized_xyxy(pred_box, width, height)
-            gx1, gy1, gx2, gy2 = (
-                normalized_xyxy(gt_box, width, height)
-                if gt_box is not None else ("", "", "", "")
-            )
-            findings.append({
-                "image": str(image_path),
-                "issue": issue,
-                "gt_class": gt_cls,
-                "gt_name": get_class_name(gt_cls),
-                "pred_class": pred_cls,
-                "pred_name": get_class_name(pred_cls),
-                "confidence": round(confidence, 4),
-                "iou": round(best_iou, 4),
-                "pred_index": pred_idx,
-                "gt_index": best_gt_idx,
-                "pred_x1": px1, "pred_y1": py1, "pred_x2": px2, "pred_y2": py2,
-                "gt_x1": gx1, "gt_y1": gy1, "gt_x2": gx2, "gt_y2": gy2,
-                "image_width": width, "image_height": height,
-            })
+                    gt_cls = -1
+                    gt_box = None
+                    if best_iou >= iou_threshold:
+                        gt_cls = int(gt_classes[best_gt_idx])
+                        gt_box = gt_boxes[best_gt_idx]
+                        if pred_cls == gt_cls:
+                            continue
+                        issue = "CLASS_MISMATCH"
+                    elif best_iou > 0:
+                        gt_cls = int(gt_classes[best_gt_idx])
+                        gt_box = gt_boxes[best_gt_idx]
+                        issue = "MISSING_OR_BAD_BOX"
+                    else:
+                        best_gt_idx = -1
+                        issue = "POSSIBLE_MISSING_LABEL"
 
-        emit(("progress", image_no, total, len(findings)))
-        if image_no % 100 == 0:
-            emit(("log", f"Audited {image_no}/{total} images; "
-                         f"{len(findings)} findings"))
+                    px1, py1, px2, py2 = normalized_xyxy(pred_box, width, height)
+                    gx1, gy1, gx2, gy2 = (
+                        normalized_xyxy(gt_box, width, height)
+                        if gt_box is not None else ("", "", "", "")
+                    )
+                    findings.append({
+                        "image": str(image_path),
+                        "issue": issue,
+                        "gt_class": gt_cls,
+                        "gt_name": get_class_name(gt_cls),
+                        "pred_class": pred_cls,
+                        "pred_name": get_class_name(pred_cls),
+                        "confidence": round(confidence, 4),
+                        "iou": round(best_iou, 4),
+                        "pred_index": pred_idx,
+                        "gt_index": best_gt_idx,
+                        "pred_x1": px1, "pred_y1": py1, "pred_x2": px2, "pred_y2": py2,
+                        "gt_x1": gx1, "gt_y1": gy1, "gt_x2": gx2, "gt_y2": gy2,
+                        "image_width": width, "image_height": height,
+                    })
+
+                count = len(processed)
+                emit(("progress", count, valid, len(findings)))
+                if count % 100 == 0 or count == valid:
+                    emit(("log", f"Audited {count}/{valid} labeled images; "
+                                 f"{len(findings)} findings"))
+        finally:
+            # Close on cancellation so temporary files can be deleted on Windows.
+            if hasattr(stream, "close"):
+                stream.close()
 
     if cancel_event.is_set():
         emit(("cancelled",))
         return
+    if len(processed) != valid:
+        raise RuntimeError(
+            f"Ultralytics returned only {len(processed)}/{valid} results. "
+            "No CSV was written; please check the prediction source and image formats."
+        )
 
     findings.sort(key=lambda row: (row["issue"] != "CLASS_MISMATCH",
                                    -row["confidence"]))
@@ -332,9 +420,10 @@ def audit_dataset(model_path, image_dir, label_dir, output_dir,
 
     elapsed = time.perf_counter() - started
     unique_images = len({row["image"] for row in findings})
-    emit(("log", f"Processed {valid} labeled images; skipped {skipped} "
-                 "images without readable annotations."))
-    emit(("complete", total, len(findings), unique_images,
+    emit(("log", f"Completed {len(processed)} labeled images; skipped {skipped} "
+                 f"without readable annotations. Device: {selected_device}; "
+                 f"elapsed: {elapsed:.1f}s"))
+    emit(("complete", valid, len(findings), unique_images,
           str(output_csv), elapsed))
 
 
@@ -342,8 +431,8 @@ class AuditGUI:
     def __init__(self, root):
         self.root = root
         root.title("YOLO Dataset Annotation Audit — Label-verified")
-        root.geometry("950x580")
-        root.minsize(800, 520)
+        root.geometry("1050x650")
+        root.minsize(890, 590)
 
         self.messages = queue.Queue()
         self.cancel_event = threading.Event()
@@ -358,6 +447,9 @@ class AuditGUI:
         self.output_var = tk.StringVar(value=str(Path.cwd()))
         self.conf_var = tk.StringVar(value="0.80")
         self.iou_var = tk.StringVar(value="0.50")
+        self.imgsz_var = tk.StringVar(value="1280")
+        self.batch_var = tk.StringVar(value="8")
+        self.device_var = tk.StringVar(value="Auto (prefer GPU)")
         self.allow_low_coverage_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Ready. Select the folders and start the audit.")
         self.csv_name_var = tk.StringVar()
@@ -401,29 +493,52 @@ class AuditGUI:
         coverage_box.pack(side="left", padx=(25, 0))
         self.inputs.append(coverage_box)
 
+        inference_options = ttk.Frame(container)
+        inference_options.grid(row=7, column=0, columnspan=3, sticky="w", pady=(8, 3))
+        ttk.Label(inference_options, text="Image size (imgsz)").pack(side="left")
+        image_size_entry = ttk.Combobox(
+            inference_options, textvariable=self.imgsz_var,
+            values=("640", "960", "1280", "1536"), width=7,
+        )
+        image_size_entry.pack(side="left", padx=(8, 24))
+        ttk.Label(inference_options, text="Batch size").pack(side="left")
+        batch_entry = ttk.Combobox(
+            inference_options, textvariable=self.batch_var,
+            values=("1", "2", "4", "8", "16", "32"), width=6,
+        )
+        batch_entry.pack(side="left", padx=(8, 24))
+        ttk.Label(inference_options, text="Inference device").pack(side="left")
+        device_entry = ttk.Combobox(
+            inference_options, textvariable=self.device_var,
+            values=("Auto (prefer GPU)", "GPU 0", "CPU"),
+            state="readonly", width=20,
+        )
+        device_entry.pack(side="left", padx=(8, 0))
+        self.inputs.extend([image_size_entry, batch_entry, device_entry])
+
         ttk.Label(
             container, textvariable=self.csv_name_var,
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(2, 14))
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(2, 14))
 
         actions = ttk.Frame(container)
-        actions.grid(row=8, column=0, columnspan=3, sticky="ew")
+        actions.grid(row=9, column=0, columnspan=3, sticky="ew")
         self.start_button = ttk.Button(actions, text="Start audit", command=self.start)
         self.start_button.pack(side="left")
         self.cancel_button = ttk.Button(actions, text="Cancel", command=self.cancel, state="disabled")
         self.cancel_button.pack(side="left", padx=(9, 0))
 
         ttk.Label(container, textvariable=self.status_var).grid(
-            row=9, column=0, columnspan=3, sticky="w", pady=(16, 5)
+            row=10, column=0, columnspan=3, sticky="w", pady=(16, 5)
         )
         self.progress = ttk.Progressbar(container, orient="horizontal", mode="determinate")
-        self.progress.grid(row=10, column=0, columnspan=3, sticky="ew")
+        self.progress.grid(row=11, column=0, columnspan=3, sticky="ew")
 
         ttk.Label(container, text="Activity log").grid(
-            row=11, column=0, columnspan=3, sticky="w", pady=(16, 5)
+            row=12, column=0, columnspan=3, sticky="w", pady=(16, 5)
         )
         log_frame = ttk.Frame(container)
-        log_frame.grid(row=12, column=0, columnspan=3, sticky="nsew")
-        container.rowconfigure(12, weight=1)
+        log_frame.grid(row=13, column=0, columnspan=3, sticky="nsew")
+        container.rowconfigure(13, weight=1)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_box = tk.Text(log_frame, height=8, wrap="word", state="disabled")
@@ -456,7 +571,7 @@ class AuditGUI:
         filename = (csv_filename_for(Path(image_dir)) if image_dir
                     else "suspicious_annotations_<image_folder>.csv")
         self.csv_name_var.set(
-            f"Top-level .jpg/.jpeg/.png only  •  Inference size: 1280  •  CSV: {filename}"
+            f"Top-level images only · Batched Ultralytics prediction · CSV: {filename}"
         )
 
     def _use_image_dir_for_labels(self):
@@ -531,8 +646,13 @@ class AuditGUI:
                 raise ValueError
             if not np.isfinite([confidence, iou]).all():
                 raise ValueError
+            imgsz = int(self.imgsz_var.get().strip())
+            batch_size = int(self.batch_var.get().strip())
+            if imgsz < 32 or imgsz > 4096 or batch_size < 1 or batch_size > 256:
+                raise ValueError
         except ValueError:
-            messagebox.showerror("Invalid thresholds", "Use numeric thresholds between 0 and 1.")
+            messagebox.showerror("Invalid settings", "Thresholds must be 0–1, "
+                                 "image size 32–4096, and batch size 1–256.")
             return
 
         output_csv = output_dir / csv_filename_for(image_dir)
@@ -542,6 +662,7 @@ class AuditGUI:
             return
 
         allow_low_coverage = self.allow_low_coverage_var.get()
+        selected_device = self.device_var.get()
         self.cancel_event.clear()
         self.progress.configure(mode="indeterminate", value=0)
         self.progress.start(12)
@@ -555,6 +676,8 @@ class AuditGUI:
                     model_path, image_dir, label_dir, output_dir,
                     confidence, iou, allow_low_coverage,
                     self.cancel_event, self.messages.put,
+                    imgsz=imgsz, batch_size=batch_size,
+                    device=selected_device,
                 )
             except Exception as exc:
                 self.messages.put(("error", str(exc), traceback.format_exc()))
@@ -583,7 +706,7 @@ class AuditGUI:
                     self.status_var.set(f"Found {self.total_images} images. Auditing ...")
                 elif kind == "progress":
                     _, completed, total, findings = event
-                    self.progress.configure(value=completed)
+                    self.progress.configure(maximum=max(1, total), value=completed)
                     if not self.cancel_event.is_set():
                         self.status_var.set(f"Audited {completed}/{total} images · {findings} findings")
                 elif kind == "complete":

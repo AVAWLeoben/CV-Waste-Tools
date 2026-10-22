@@ -6,8 +6,9 @@ Three applications in one launcher:
   (2) Annotation Audit: check labeled images using a YOLO model and export a
       CSV for the CV Waste Web REVIEW task. It does not edit annotation files.
   (3) Precision / Recall Test: select a YOLO model, dataset YAML or image folder,
-      and target Food precision. Runs validation and reports confidence threshold
-      and recall, with CSV and JSON reports.
+      and target Food precision. Runs one batched model.predict() pass (conf=0.01),
+      stores detections in a reusable cache, then computes exact TP/FP/FN and
+      Recall@Precision offline. Re-evaluating does not rerun inference.
 
 QUICK START - WINDOWS 10/11
 ---------------------------
@@ -89,6 +90,12 @@ a prebuilt CUDA-enabled torch + torchvision rather than CPU-only PyTorch.
 - For newer NVIDIA cards the launcher keeps the modern CUDA wheel selection:
   driver maximum >=13.2 -> cu132; >=13.0 -> cu130; >=12.8 -> cu128;
   >=12.6 -> cu126; >=11.8 -> cu118.
+- IMPORTANT: If an NVIDIA GPU is detected but nvidia-smi omits the CUDA
+  version, do not silently choose a CPU-only environment. Test existing
+  CUDA-capable environments first; when setup is necessary, attempt a GPU
+  wheel selected for the compute capability (e.g. cu128 for an RTX 5090),
+  then verify real CUDA execution. If the driver cannot run the selected
+  wheel, setup fails with a CUDA error rather than quietly using CPU.
 - The PyTorch wheel includes CUDA runtime libraries. Normally you do NOT
   need to separately install the full CUDA Toolkit; you DO need a working
   NVIDIA GPU driver on the host. Conda does not install/update GPU drivers.
@@ -113,8 +120,10 @@ a prebuilt CUDA-enabled torch + torchvision rather than CPU-only PyTorch.
 TO TRAIN ON THE GPU
 -------------------
 Open "Split & Train", switch to "2. Model & training", and explicitly
-select "GPU 0 (CUDA)" under Training device. "Auto" in this training GUI
-currently defaults to CPU; installing CUDA PyTorch does not change that.
+select "GPU 0 (CUDA)" under Training device or keep "Auto (prefer GPU)".
+Auto now uses CUDA on supported NVIDIA hardware and raises an error if an
+NVIDIA GPU exists but the active environment cannot access CUDA. Select CPU
+explicitly only when CPU training is intended.
 The launcher displays "CUDA: available" (and the GPU name) once the setup
 has been verified. The first installation needs internet access and may
 download multiple gigabytes.
@@ -170,8 +179,9 @@ TROUBLESHOOTING
   desktop, remote X forwarding or an appropriate virtual display.
 - GPU absent: check "nvidia-smi" on the host. If it fails, repair/install
   the NVIDIA driver, not just the CUDA Python packages.
-- Training runs on CPU: select "GPU 0 (CUDA)" in the training GUI; check
-  that launcher status reports "CUDA: available" first.
+- Training runs on CPU: Auto now prefers CUDA and will not silently select
+  CPU when an NVIDIA driver is detected. Check that the launcher reports
+  "CUDA: available" and use Recheck / repair environment when needed.
 - Environment repair: use the launcher "Recheck / repair environment" button.
 - If upgrading from a package that reported "timed out after 100 seconds",
   replace the extracted program files with this version and double-click the
@@ -202,3 +212,83 @@ The Open logs folder button opens that directory. Logs stay available even
 if the main launcher is closed while training continues.
 Windows bootstrap diagnostics are saved to logs/windows_startup.log when
 launching with the .vbs shortcut.
+
+
+BATCHED ANNOTATION AUDIT AND DEVICE SELECTION (UPDATED)
+------------------------------------------------------
+The Annotation Audit GUI now accepts:
+- Image size (imgsz): 640 / 960 / 1280 / 1536, or any positive valid value.
+- Batch size: choose according to available VRAM (e.g. 2 on a 6GB GTX 1060;
+  8 or more on a sufficiently equipped RTX 5090).
+- Device: Auto (prefer GPU), GPU 0, or CPU.
+
+The audit scans only images directly inside the chosen image folder, checks
+whether each has a readable YOLO label, and creates a temporary .txt manifest
+containing only the eligible images. It runs one Ultralytics model.predict()
+call with stream=True, batch=<selected>, imgsz=<selected>, and device=<selected>.
+Ultralytics handles image loading/preprocessing in batches. Prediction results
+are joined to each annotation by full resolved filename (not list index) and
+written into the same web-REVIEW-compatible CSV schema.
+
+The configured audit confidence cutoff (default 0.80) is deliberately distinct
+from the low confidence floor in the Precision/Recall test. The latter uses
+Ultralytics model.val()'s batched validation dataloader and P/R curves.
+
+On an NVIDIA machine, a cached Conda environment reporting CUDA=False is
+invalidated rather than reused. Rechecking discovers a CUDA-capable
+existing environment or repairs the dedicated cv-waste-tools environment.
+The software never installs GPU drivers.
+
+
+FAST RECALL@PRECISION TEST — ONE-TIME INFERENCE + CACHE
+------------------------------------------------------
+Open Precision / Recall Test from the CV Waste Tools startup window.
+Choose best.pt, a dataset YAML (data.yaml / autosplit_data.yaml) or an image
+folder, and the desired test/val/train split. Set image size, batch size,
+Food class ID, target precision, matching IoU, NMS IoU and GPU/CPU selection.
+
+FIRST RUN:
+- Use "Run / reuse cached predictions" with "Reuse existing prediction cache"
+  enabled (default).
+- Ultralytics predict() processes all selected images ONCE at conf=0.01
+  using a .txt image manifest, stream=True, and your batch setting.
+- Bounding boxes, class IDs, image indices and confidence scores are saved
+  in output/prediction_cache/detections_<key>.npz, with adjacent JSON metadata.
+- Label files are read and matched to Food predictions at the configured IoU.
+- Matching uses a confidence-ordered, one-to-one greedy class-aware rule.
+  Each correct Food prediction counts once (TP); another Food prediction on
+  the same Food item, or on Non_Food/background, counts as FP. Unmatched
+  Food ground truth counts as FN.
+- The confidence sweep is computed from these raw detections; it does not
+  run the network again. It reports the maximum Food recall at or above the
+  requested minimum Food precision.
+
+LATER RUNS:
+- Change target precision or matching IoU and click
+  "Recalculate from cache only" for a guaranteed inference-free calculation.
+- You can correct ground-truth labels without rerunning inference: labels are
+  re-read fresh each time. The model and images must stay unchanged.
+- The cache is automatically invalidated if model file, image files, image
+  size, NMS IoU or max detections change. Changing batch size does NOT
+  invalidate it, since batch size should not change predictions.
+- Uncheck "Reuse existing prediction cache" to force another inference pass.
+- Changing the model or dataset requires one new pass for that combination.
+
+OUTPUTS:
+- output/prediction_cache/detections_<key>.npz (reusable predictions)
+- output/prediction_cache/detections_<key>.json (cache metadata)
+- output/precision_recall_<timestamp>/food_precision_recall_by_confidence.csv
+- output/precision_recall_<timestamp>/operating_point_summary.json
+- Optional precision and recall vs confidence PNG (off by default for speed)
+
+NOTES:
+- Predicted confidences below 0.01 do not exist in the cache. The tool does
+  not reproduce Ultralytics' smoothed/interpolated model.val() PR curves.
+  Its values are empirical instance-level TP/FP/FN at the chosen IoU.
+- Unlabeled images are treated as annotated backgrounds. Check the logs for
+  the count of missing annotation files to spot misconfigured label paths.
+- The tool deliberately refuses silent CPU inference if an NVIDIA GPU is
+  detectable but torch.cuda.is_available() is False. It asks you to repair
+  the launcher environment instead. CPU can be explicitly chosen.
+- This is instance-level precision, NOT mass-weighted purity from sorting
+  trials. Heavy contaminants may have disproportionate economic impact.
