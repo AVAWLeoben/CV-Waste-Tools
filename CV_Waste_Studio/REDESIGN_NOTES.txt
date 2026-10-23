@@ -38,3 +38,8 @@ Update: independent existing-dataset training
 - Added lightweight preflight YAML validation and a dataset picker.
 - Source selection now recognises images/ and labels/ as one paired dataset.
 - The worker still runs headlessly with all existing training controls.
+
+BRANDING UPDATE
+---------------
+- Branded Windows multi-size .ico, window/taskbar icon, sidebar logo and app identity.
+- One-click shortcut installer for an iconized launcher (Windows cannot change the actual VBS file type icon per file).

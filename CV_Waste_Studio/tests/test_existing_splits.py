@@ -59,7 +59,70 @@ class DatasetWorkflows(unittest.TestCase):
         self.assertIsNone(results["split"])
         self.assertEqual(results["training"], "simulated-train")
         self.assertEqual(invocations[1]["data"], str(self.yaml))
+        self.assertEqual(invocations[1]["cache"], "disk")
+        self.assertEqual(invocations[1]["workers"], 8)
         self.assertEqual(self.yaml.read_bytes(), existing_bytes)
+
+    def test_existing_mode_cache_off_and_workers_pass_through(self):
+        received = []
+
+        class FakeYOLO:
+            def __init__(self, model):
+                pass
+
+            def train(self, **kwargs):
+                received.append(kwargs)
+                return "simulated-train"
+
+        fake_ultra = types.ModuleType("ultralytics")
+        fake_ultra.YOLO = FakeYOLO
+        fake_torch = types.ModuleType("torch")
+        with patch.object(backend, "autosplit_dataset", side_effect=AssertionError("Split was called")), \
+             patch.object(backend, "_ensure_gpu_pytorch", return_value=None), \
+             patch.object(backend, "_load_dependency", return_value=None), \
+             patch.object(backend, "_select_training_device", return_value="cpu"), \
+             patch.dict(sys.modules, {"ultralytics": fake_ultra, "torch": fake_torch}):
+            backend.autosplit_and_train_model(
+                existing_data_yaml=str(self.yaml), device="cpu", cache="off", workers=0,
+                project=str(self.root / "results"), compact_progress=False,
+            )
+        self.assertEqual(received[0]["cache"], False)
+        self.assertEqual(received[0]["workers"], 0)
+
+    def test_invalid_cache_and_workers_rejected(self):
+        for settings, expected in (({"cache": "foo"}, "Cache"),
+                                   ({"workers": -1}, "Workers")):
+            with self.subTest(settings=settings):
+                with self.assertRaisesRegex(ValueError, expected):
+                    backend.autosplit_and_train_model(
+                        existing_data_yaml=str(self.yaml), **settings,
+                    )
+
+    def test_boolean_cache_normalization(self):
+        for value, expected in ((False, "off"), (True, "ram"), (None, "off")):
+            with self.subTest(cache=value):
+                captured = []
+
+                class FakeYOLO:
+                    def __init__(self, model):
+                        pass
+
+                    def train(self, **kwargs):
+                        captured.append(kwargs["cache"])
+                        return None
+
+                fake_ultra = types.ModuleType("ultralytics")
+                fake_ultra.YOLO = FakeYOLO
+                with patch.object(backend, "_ensure_gpu_pytorch", return_value=None), \
+                     patch.object(backend, "_load_dependency", return_value=None), \
+                     patch.object(backend, "_select_training_device", return_value="cpu"), \
+                     patch.dict(sys.modules, {"ultralytics": fake_ultra,
+                                              "torch": types.ModuleType("torch")}):
+                    backend.autosplit_and_train_model(
+                        existing_data_yaml=str(self.yaml), cache=value,
+                        project=str(self.root / "results"), compact_progress=False,
+                    )
+                self.assertEqual(captured, [False if expected == "off" else expected])
 
 
 if __name__ == "__main__":

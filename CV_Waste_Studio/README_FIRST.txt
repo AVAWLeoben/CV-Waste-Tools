@@ -53,8 +53,11 @@ WINDOWS QUICK START
 -------------------
 1. Extract the entire Model_Training directory, preserving its files.
 2. Install Miniforge, Miniconda or Anaconda if Conda is not installed.
-3. Double-click START_CV_WASTE_TOOLS.vbs for console-free startup.
-   To troubleshoot startup, run START_GREENPLAST.bat instead.
+3. For the branded Windows launcher, double-click
+   CREATE_CV_WASTE_STUDIO_SHORTCUTS.vbs once, then launch via the new
+   "CV Waste Studio" shortcut on your desktop or in this folder.
+   The original START_CV_WASTE_TOOLS.vbs also works (with Windows' generic
+   VBS file icon). To troubleshoot startup, run START_GREENPLAST.bat instead.
 4. Initial startup may install/recheck the Conda environment. The initial
    setup screen is then replaced by the main Studio interface automatically.
    It is not a second tool window and does not require user interaction.
@@ -109,6 +112,10 @@ long production run. This project does not install GPU drivers.
 TECHNICAL NOTES / BACKWARD COMPATIBILITY
 ----------------------------------------
 - GUI shell: greenplast_launcher.py
+- App branding: studio_branding.py, assets/cv_waste_studio_windows_v5.ico and assets/cv_waste_studio.png
+  (original user-supplied logo; small GUI variants are derived from it)
+- Windows branded shortcut installer: CREATE_CV_WASTE_STUDIO_SHORTCUTS.vbs
+- Branding and shortcut instructions: ICON_AND_SHORTCUTS.txt
 - Headless split/train worker: run_training_job.py
 - Original split/train module: train_and_split_tool_GUI.py
 - Original annotation audit: audit_dataset_review_gui.py
@@ -152,3 +159,6 @@ TRAINING AN EXISTING SPLIT WITHOUT CREATING NEW SPLITS
 If you have separate images/ and labels/ directories but no train/val split,
 use Split + train. If you already split images into train/val/test but have
 no YAML, add a standard Ultralytics data.yaml first.
+
+ICON TROUBLESHOOTING (V5): See ICON_AND_SHORTCUTS.txt. Unpin old Windows
+taskbar icons before recreating shortcuts with the supplied VBS installer.

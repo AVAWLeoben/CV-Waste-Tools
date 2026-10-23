@@ -1335,20 +1335,35 @@ def _all_in_one_gui(parent=None, on_submit=None):
     field("Image size (imgsz)", 7)
     imgsz = tk.StringVar(value="640")
     ttk.Entry(train_tab, textvariable=imgsz, width=15).grid(row=7, column=1, sticky="w")
-    field("CLS loss weight", 8)
+    field("Cache", 8)
+    cache = tk.StringVar(value="disk")
+    ttk.Combobox(train_tab, textvariable=cache, values=("off", "ram", "disk"),
+                 width=15, state="readonly").grid(row=8, column=1, sticky="w", pady=8)
+    ttk.Label(train_tab, text="disk = builds .npy files next to the images on the first epoch, "
+              "then much faster. ram = fastest but needs lots of memory. "
+              "Recommended for large images.", wraplength=600,
+              foreground="#555555").grid(row=9, column=1, columnspan=2, sticky="w")
+    field("Workers", 10)
+    workers = tk.StringVar(value="8")
+    ttk.Entry(train_tab, textvariable=workers, width=15).grid(row=10, column=1, sticky="w")
+    ttk.Label(train_tab, text="Dataloader worker processes. 0 = main process only (slowest).",
+              wraplength=260, foreground="#555555").grid(
+        row=10, column=2, sticky="w", padx=(8, 0))
+    field("CLS loss weight", 11)
     cls_weight = tk.StringVar(value="0.5")
-    ttk.Entry(train_tab, textvariable=cls_weight, width=15).grid(row=8, column=1, sticky="w")
+    ttk.Entry(train_tab, textvariable=cls_weight, width=15).grid(row=11, column=1, sticky="w")
     ttk.Label(train_tab, text="Default 0.5; higher values prioritize classification loss.",
-              foreground="#555555").grid(row=8, column=2, sticky="w", padx=(8, 0))
-    field("Training device", 9)
+              foreground="#555555", wraplength=260).grid(
+        row=11, column=2, sticky="w", padx=(8, 0))
+    field("Training device", 12)
     choices = {"auto": "Auto (prefer GPU)", "cpu": "CPU", "gpu": "GPU 0 (CUDA)"}
     device = tk.StringVar(value=choices["auto"])
     ttk.Combobox(train_tab, textvariable=device, values=tuple(choices.values()),
-                 width=25, state="readonly").grid(row=9, column=1, sticky="w", pady=8)
+                 width=25, state="readonly").grid(row=12, column=1, sticky="w", pady=8)
     cuda_install = tk.BooleanVar(value=False)
     cuda_checkbox = ttk.Checkbutton(train_tab, variable=cuda_install,
                                     text="Install CUDA PyTorch if needed (NVIDIA, opt-in)")
-    cuda_checkbox.grid(row=10, column=0, columnspan=3, sticky="w", pady=(0, 10))
+    cuda_checkbox.grid(row=13, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
     def toggle_cuda(*_args):
         if device.get() == choices["gpu"]:
@@ -1359,8 +1374,8 @@ def _all_in_one_gui(parent=None, on_submit=None):
 
     device.trace_add("write", toggle_cuda)
     toggle_cuda()
-    field("Training results folder", 11)
-    ttk.Entry(train_tab, textvariable=results_folder).grid(row=11, column=1,
+    field("Training results folder", 14)
+    ttk.Entry(train_tab, textvariable=results_folder).grid(row=14, column=1,
                                                             sticky="ew", pady=8)
 
     def browse_results():
@@ -1371,17 +1386,17 @@ def _all_in_one_gui(parent=None, on_submit=None):
             results_custom = True
             results_folder.set(path)
 
-    ttk.Button(train_tab, text="Browse...", command=browse_results).grid(row=11, column=2,
+    ttk.Button(train_tab, text="Browse...", command=browse_results).grid(row=14, column=2,
                                                                            padx=(12, 0))
-    field("Run name", 12)
+    field("Run name", 15)
     run_name = tk.StringVar(value="train")
-    ttk.Entry(train_tab, textvariable=run_name).grid(row=12, column=1, sticky="ew")
+    ttk.Entry(train_tab, textvariable=run_name).grid(row=15, column=1, sticky="ew")
     compact_progress = tk.BooleanVar(value=True)
     ttk.Checkbutton(train_tab, variable=compact_progress,
                     text="Compact training progress (one update per epoch)").grid(
-        row=13, column=0, columnspan=3, sticky="w", pady=(12, 6))
+        row=16, column=0, columnspan=3, sticky="w", pady=(12, 6))
     ttk.Label(train_tab, text="Training creates model checkpoints and metrics in the results folder.",
-              foreground="#555555").grid(row=14, column=0, columnspan=3,
+              foreground="#555555").grid(row=17, column=0, columnspan=3,
                                            sticky="w", pady=(6, 0))
 
     chosen_settings = {}
@@ -1435,6 +1450,9 @@ def _all_in_one_gui(parent=None, on_submit=None):
                     _build_model_filename(version.get(), size.get())
                 n_batch = int(batch.get())
                 n_imgsz = int(imgsz.get())
+                n_workers = int(workers.get())
+                if n_workers < 0:
+                    raise ValueError("Workers must be a non-negative integer.")
                 selected_cls_weight = _validate_cls_weight(cls_weight.get())
                 if n_batch <= 0 or n_imgsz <= 0:
                     raise ValueError("Batch and image size must be positive integers.")
@@ -1457,6 +1475,7 @@ def _all_in_one_gui(parent=None, on_submit=None):
                     "version": version.get(), "size": size.get(),
                     "model_path": model_weights or None, "epochs": epochs,
                     "time": hours, "batch": n_batch, "imgsz": n_imgsz,
+                    "cache": cache.get(), "workers": n_workers,
                     "cls_weight": selected_cls_weight,
                     "device": next(k for k, v in choices.items() if v == device.get()),
                     "auto_install_cuda": cuda_install.get(),
@@ -1574,7 +1593,7 @@ def autosplit_and_train_model(
     version="11", size="l", model_path=None, epochs=100, time=None,
     batch=4, imgsz=640, device="auto", auto_install_cuda=False,
     project=None, run_name="train", compact_progress=True, cls_weight=0.5,
-    existing_data_yaml=None,
+    existing_data_yaml=None, cache="disk", workers=8,
 ):
     """Create YOLO split lists, split and train, or train an existing split.
 
@@ -1606,6 +1625,14 @@ def autosplit_and_train_model(
         if batch <= 0 or imgsz <= 0:
             raise ValueError("Batch and image size must be positive.")
         cls_weight = _validate_cls_weight(cls_weight)
+        if cache is False or cache is None:
+            cache = "off"
+        elif cache is True:
+            cache = "ram"
+        if cache not in ("off", "ram", "disk"):
+            raise ValueError("Cache must be 'off', 'ram', or 'disk'.")
+        if isinstance(workers, bool) or not isinstance(workers, int) or workers < 0:
+            raise ValueError("Workers must be a non-negative integer.")
         if time is not None:
             time = float(time)
             if not math.isfinite(time) or time <= 0:
@@ -1685,6 +1712,7 @@ def autosplit_and_train_model(
         "data": str(yaml_file), "imgsz": imgsz, "batch": batch,
         "device": selected_device, "project": str(project_dir),
         "name": str(run_name).strip() or "train", "cls": cls_weight,
+        "cache": False if cache == "off" else cache, "workers": workers,
     }
     if time is not None:
         kwargs["time"] = time
@@ -1694,7 +1722,8 @@ def autosplit_and_train_model(
         print(f"Training {model_file} on existing train/val split (no resplitting)")
     else:
         print(f"Training {model_file} on {sum(split_result['counts'].values())} images")
-    print(f"Data: {yaml_file} | device: {selected_device} | image size: {imgsz} | cls: {cls_weight:g}")
+    print(f"Data: {yaml_file} | device: {selected_device} | image size: {imgsz} "
+          f"| cache: {cache} | workers: {workers} | cls: {cls_weight:g}")
     trained = _train_with_compact_progress(YOLO(model_file), kwargs, compact_progress)
     print(f"Training finished. Results saved in: {project_dir}")
     return {"split": split_result, "training": trained, "dataset_yaml": str(yaml_file)}

@@ -1,0 +1,39 @@
+CV WASTE STUDIO V5 — WINDOWS ICON CACHE / MEDIUM ICON FIX
+============================================================
+
+Why the previous icon can reappear
+----------------------------------
+Windows Explorer and previously pinned taskbar shortcuts may continue using
+an older icon resource even after assets/cv_waste_studio.ico is replaced.
+The screenshots showed that old camera/recycling artwork, WITHOUT the tools.
+The supplied custom icon itself contains the tools at all key sizes.
+
+Fix in this package
+-------------------
+- assets/cv_waste_studio_windows_v5.ico is a NEW multi-size Windows resource.
+  It was built from YOUR original assets/cv_waste_studio.png.
+- ICO frames: 16, 20, 24, 32, 40, 48, 64, 96, 128, and 256 pixels.
+- The original assets/cv_waste_studio.png and cv_waste_studio.ico are retained.
+- The Tk window icon and shortcut installer both explicitly use the new file.
+- The shortcut installer deletes and recreates old desktop/app .lnk shortcuts.
+- Tk also has 16/24/32/48/64/128/256 PNG variants for window scaling.
+
+HOW TO UPDATE WINDOWS
+---------------------
+1. CLOSE CV Waste Studio. If it is pinned to the taskbar, UNPIN the old icon.
+2. Extract this version into your chosen application folder, replacing files.
+   Ensure assets/cv_waste_studio_windows_v5.ico exists there.
+3. DELETE old CV Waste Studio desktop shortcuts if they refer to other installs.
+4. Double-click CREATE_CV_WASTE_STUDIO_SHORTCUTS.vbs. It recreates shortcuts.
+5. Open the NEW desktop shortcut. The desktop shortcut and running app should
+   both use the tools-and-camera logo. Pin the RUNNING app again if desired.
+
+If the old desktop icon still appears after those steps, refresh the Windows
+Desktop (right-click > Refresh). If needed, restart Windows Explorer or sign
+out/in. Windows can retain an icon-cache entry for the old pinned program.
+
+Note: .vbs files themselves always display the generic VBS icon in Windows.
+The branded launcher is the .lnk shortcut created by the installer. Also,
+Windows may overlay the normal shortcut arrow in the lower-left corner.
+
+No dataset, training, audit, or evaluation processing was changed in v5.

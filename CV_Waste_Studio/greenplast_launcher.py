@@ -21,6 +21,8 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from studio_branding import apply_window_icon, set_windows_app_id, sidebar_icon
+
 from greenplast_environment import (
     APP_DIR, EnvironmentManager, probe_env, cached_environment,
     save_cached_environment, CONFIG_FILE, env_python,
@@ -55,7 +57,9 @@ def _same_executable(a, b):
 
 class Studio:
     def __init__(self, prepared=None):
+        set_windows_app_id()
         self.root = tk.Tk()
+        apply_window_icon(self.root)
         self.root.title("CV Waste Studio")
         self.root.geometry("1290x845")
         self.root.minsize(1010, 690)
@@ -131,12 +135,20 @@ class Studio:
         sidebar = tk.Frame(self.outer, bg=NAV_BG, width=220)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
-        tk.Label(sidebar, text="CV  /  WASTE", bg=NAV_BG, fg="#8DA7FF",
-                 font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x", padx=23, pady=(30, 1))
-        tk.Label(sidebar, text="STUDIO", bg=NAV_BG, fg="white",
-                 font=("Segoe UI", 22, "bold"), anchor="w").pack(fill="x", padx=22)
-        tk.Label(sidebar, text="Model operations", bg=NAV_BG, fg=NAV_MUTED,
-                 font=("Segoe UI", 10), anchor="w").pack(fill="x", padx=24, pady=(2, 28))
+        brand = tk.Frame(sidebar, bg=NAV_BG)
+        brand.pack(fill="x", padx=16, pady=(26, 26))
+        self.brand_icon = sidebar_icon(self.root)
+        if self.brand_icon is not None:
+            tk.Label(brand, image=self.brand_icon, bg=NAV_BG, bd=0).pack(
+                side="left", padx=(0, 9))
+        brand_text = tk.Frame(brand, bg=NAV_BG)
+        brand_text.pack(side="left", fill="x")
+        tk.Label(brand_text, text="CV / WASTE", bg=NAV_BG, fg="#8DA7FF",
+                 font=("Segoe UI", 9, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(brand_text, text="STUDIO", bg=NAV_BG, fg="white",
+                 font=("Segoe UI", 19, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(brand_text, text="Model operations", bg=NAV_BG, fg=NAV_MUTED,
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w", pady=(2, 0))
         tk.Frame(sidebar, height=1, bg="#293A52").pack(fill="x", padx=19, pady=(0, 18))
         nav_items = (
             ("train", "01", "Datasets & training"),
