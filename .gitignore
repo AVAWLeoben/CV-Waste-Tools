@@ -22,6 +22,7 @@ __pycache__/
 *.png
 *.npz
 *.pyc
+*.lnk
 
 # -----------------------------------------------------------------------------
 # Log directories from both CV_Waste_Studio and CV_Waste_Studio_Legacy
