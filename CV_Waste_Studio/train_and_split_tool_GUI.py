@@ -1023,8 +1023,120 @@ def resolve_existing_dataset_yaml(selection):
             "test": contents.get("test")}
 
 
+# Cache cleanup is opt-in to the disk-cache training path.  Only image-specific
+# .npy files missing before THIS run may be removed; never glob/delete all .npy.
+_CACHE_IMAGE_EXTENSIONS = frozenset((
+    ".bmp", ".dng", ".heic", ".heif", ".jpeg", ".jpg", ".jpe",
+    ".jp2", ".mpo", ".png", ".tif", ".tiff", ".webp", ".pfm",
+))
+
+
+def _disk_cache_candidates(dataset_yaml, config):
+    """Locate Ultralytics image cache paths in train and val (dir, TXT or image)."""
+    from pathlib import Path
+
+    yaml_dir = Path(dataset_yaml).resolve().parent
+    root = Path(str(config.get("path") or yaml_dir)).expanduser()
+    if not root.is_absolute():
+        root = (yaml_dir / root).resolve()
+    result = set()
+
+    def images_for(entry, base, manifest=False):
+        raw = str(entry).strip()
+        if not raw or raw.startswith(("http://", "https://")):
+            return
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            # In Ultralytics TXT lists, ./image.jpg is relative to the list.
+            if manifest and raw.startswith(("./", ".\\")):
+                path = base / raw[2:]
+            else:
+                path = base / path
+        path = path.resolve()
+        if path.is_dir():
+            for image in path.rglob("*"):
+                if image.suffix.lower() in _CACHE_IMAGE_EXTENSIONS and image.is_file():
+                    result.add(image.with_suffix(".npy"))
+        elif path.is_file() and path.suffix.lower() == ".txt":
+            for line in path.read_text(encoding="utf-8-sig").splitlines():
+                if line.strip():
+                    images_for(line, path.parent, manifest=True)
+        elif path.is_file() and path.suffix.lower() in _CACHE_IMAGE_EXTENSIONS:
+            result.add(path.with_suffix(".npy"))
+
+    for split in ("train", "val"):
+        entries = config.get(split, [])
+        for entry in entries if isinstance(entries, list) else [entries]:
+            if entry is None:
+                continue
+            # Some YOLO YAMLs omit path and use paths relative to the YAML.
+            # Prefer the declared dataset root; fall back to the YAML folder.
+            target = Path(str(entry)).expanduser()
+            if target.is_absolute() or (root / target).exists():
+                images_for(entry, root)
+            else:
+                images_for(entry, yaml_dir)
+    return result
+
+
+def _remove_new_disk_cache(paths, manifest=None):
+    """Delete only cache candidates recorded absent before the run."""
+    from pathlib import Path
+
+    count, released, errors = 0, 0, []
+    for value in paths:
+        path = Path(value)
+        if path.suffix.lower() != ".npy":
+            errors.append(f"Refusing non-cache path: {path}")
+            continue
+        try:
+            if path.is_file():
+                released += path.stat().st_size
+                path.unlink()
+                count += 1
+        except OSError as exc:
+            errors.append(f"{path}: {exc}")
+    print(f"Disk image cache cleanup: deleted {count} new .npy file(s) "
+          f"({released / (1024 ** 3):.2f} GiB).", flush=True)
+    for message in errors[:12]:
+        print(f"WARNING: Disk cache cleanup: {message}", flush=True)
+    if errors and len(errors) > 12:
+        print(f"WARNING: ... and {len(errors) - 12} more cleanup errors.", flush=True)
+    if manifest is not None and not errors:
+        Path(manifest).unlink(missing_ok=True)
+    return count, errors
+
+
+def cleanup_disk_cache_manifest(manifest):
+    """Finish cleanup after a forcibly stopped Windows job (whose finally cannot run)."""
+    import json
+    from pathlib import Path
+
+    target = Path(manifest)
+    if not target.is_file():
+        return 0, []
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("format") != "cv-waste-disk-cache-v1":
+        raise ValueError(f"Unrecognised cache manifest: {target}")
+    return _remove_new_disk_cache(payload["created_candidates"], target)
+
+
+def _save_disk_cache_manifest(manifest, candidates):
+    """Write the absent-before-training list atomically for forced-stop recovery."""
+    import json
+    from pathlib import Path
+
+    target = Path(manifest)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(json.dumps({"format": "cv-waste-disk-cache-v1",
+                               "created_candidates": sorted(map(str, candidates))}),
+                   encoding="utf-8")
+    tmp.replace(target)
+
+
 # --- ALL-IN-ONE MULTI-DATASET SPLIT + TRAIN (NO IMAGE/LABEL COPYING) ---
-def _all_in_one_gui(parent=None, on_submit=None):
+def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
     """Build the original split/train form in a standalone window or embedded page.
 
     An embedded form calls on_submit(validated_settings), without destroying
@@ -1125,6 +1237,8 @@ def _all_in_one_gui(parent=None, on_submit=None):
     train_page = ttk.Frame(notebook)
     notebook.add(split_page, text="1. Dataset & split")
     notebook.add(train_page, text="2. Model & training")
+    preannotate_page = ttk.Frame(notebook)
+    notebook.add(preannotate_page, text="3. Pre-Annotate")
     split_page.columnconfigure(0, weight=1)
     split_page.rowconfigure(0, weight=1)
     split_canvas = tk.Canvas(split_page, highlightthickness=0, bd=0, background="#FFFFFF")
@@ -1220,16 +1334,35 @@ def _all_in_one_gui(parent=None, on_submit=None):
         if not results_custom:
             results_folder.set(str(Path(split_output.get()) / "training_runs"))
 
-    def add_source():
-        initial = str(Path(sources[-1]).parent) if sources else str(Path.home())
-        selected = _select_multiple_directories(root, initial, "Select dataset folders")
-        for path in _autosplit_source_paths(selected):
+    def append_sources(paths):
+        try:
+            selected = _autosplit_source_paths(paths)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Dataset folders", str(exc), parent=root)
+            return
+        for path in selected:
             normalized = str(path)
             if normalized not in sources:
                 sources.append(normalized)
                 folders.insert(tk.END, normalized)
         if selected:
             fill_defaults()
+
+    def add_source():
+        # One native folder dialog: no custom picker + second navigation window.
+        initial = str(Path(sources[-1]).parent) if sources else str(Path.home())
+        path = filedialog.askdirectory(parent=root, initialdir=initial,
+                                       title="Add a dataset folder", mustexist=True)
+        if path:
+            append_sources([path])
+
+    def add_pasted_sources():
+        import re
+        paths = [p.strip().strip('"') for p in re.split(r"[;\n]+", pasted_paths.get())
+                 if p.strip()]
+        if paths:
+            append_sources(paths)
+            pasted_paths.set("")
 
     def remove_source():
         for index in reversed(folders.curselection()):
@@ -1239,11 +1372,19 @@ def _all_in_one_gui(parent=None, on_submit=None):
 
     actions = ttk.Frame(split_tab)
     actions.grid(row=0, column=2, sticky="n", pady=6)
-    ttk.Button(actions, text="Add folder(s)...", command=add_source).pack(fill="x", pady=(0, 8))
+    ttk.Button(actions, text="Add folder…", command=add_source).pack(fill="x", pady=(0, 8))
     ttk.Button(actions, text="Remove selected", command=remove_source).pack(fill="x")
-    ttk.Label(split_tab, text="Mixed image.jpg/image.txt folders or images/ + labels/ folders",
-              foreground="#555555").grid(row=1, column=0, columnspan=3,
-                                           sticky="w", pady=(0, 14))
+    pasted_paths = tk.StringVar()
+    paste_bar = ttk.Frame(split_tab)
+    paste_bar.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+    paste_bar.columnconfigure(0, weight=1)
+    ttk.Entry(paste_bar, textvariable=pasted_paths).grid(
+        row=0, column=0, sticky="ew", padx=(0, 10))
+    ttk.Button(paste_bar, text="Add pasted path(s)", command=add_pasted_sources).grid(
+        row=0, column=1)
+    ttk.Label(paste_bar, text="Paste one folder path or multiple paths separated by ;  "
+              "·  images/ + labels/ are recognised as one dataset",
+              foreground="#555555").grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
 
     ttk.Label(split_tab, text="Split-list output").grid(row=2, column=0, sticky="w", pady=7)
     ttk.Entry(split_tab, textvariable=split_output).grid(row=2, column=1, sticky="ew", padx=12)
@@ -1399,9 +1540,165 @@ def _all_in_one_gui(parent=None, on_submit=None):
               foreground="#555555").grid(row=17, column=0, columnspan=3,
                                            sticky="w", pady=(6, 0))
 
+    cleanup_disk_cache = tk.BooleanVar(value=True)
+    cleanup_box = ttk.Checkbutton(
+        train_tab, variable=cleanup_disk_cache,
+        text="Delete newly created disk .npy caches after training (also on error)")
+    cleanup_box.grid(row=18, column=0, columnspan=3, sticky="w", pady=(12, 5))
+    ttk.Label(train_tab, text="Existing .npy caches are preserved; images and labels are untouched.",
+              foreground="#555555", wraplength=620).grid(
+        row=19, column=1, columnspan=2, sticky="w")
+
+    def update_cache_cleanup(*_args):
+        cleanup_box.state(["!disabled"] if cache.get() == "disk" else ["disabled"])
+
+    cache.trace_add("write", update_cache_cleanup)
+    update_cache_cleanup()
+
+    # 3. Pre-Annotate: independent of the selected split/training workflow.
+    preannotate_page.columnconfigure(0, weight=1)
+    annotate_canvas = tk.Canvas(preannotate_page, highlightthickness=0, bd=0)
+    annotate_canvas.grid(row=0, column=0, sticky="nsew")
+    preannotate_page.rowconfigure(0, weight=1)
+    annotate_scroll = ttk.Scrollbar(preannotate_page, orient="vertical",
+                                    command=annotate_canvas.yview)
+    annotate_scroll.grid(row=0, column=1, sticky="ns")
+    annotate_canvas.configure(yscrollcommand=annotate_scroll.set)
+    annotate_tab = ttk.Frame(annotate_canvas, padding=18)
+    annotate_tab.columnconfigure(1, weight=1)
+    annotate_window = annotate_canvas.create_window((0, 0), window=annotate_tab, anchor="nw")
+    annotate_canvas.bind("<Configure>", lambda e: annotate_canvas.itemconfigure(
+        annotate_window, width=e.width))
+    annotate_tab.bind("<Configure>", lambda _e: annotate_canvas.configure(
+        scrollregion=annotate_canvas.bbox("all")))
+    annotate_canvas.bind("<Enter>", lambda _e: (
+        root.bind_all("<MouseWheel>", lambda ev: annotate_canvas.yview_scroll(
+            -int(ev.delta / 120), "units") if ev.delta else None),
+        root.bind_all("<Button-4>", lambda _ev: annotate_canvas.yview_scroll(-1, "units")),
+        root.bind_all("<Button-5>", lambda _ev: annotate_canvas.yview_scroll(1, "units"))))
+    annotate_canvas.bind("<Leave>", disable_training_scroll)
+
+    ttk.Label(annotate_tab, text="Generate YOLO bounding-box annotations",
+              font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=3,
+                                                     sticky="w", pady=(0, 8))
+    ttk.Label(annotate_tab, text="Images are not moved. Existing .txt labels are "
+              "preserved by default. Review generated predictions before training.",
+              wraplength=700, foreground="#555555").grid(
+        row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
+
+    def annotate_field(row, caption):
+        ttk.Label(annotate_tab, text=caption).grid(row=row, column=0,
+                                                    sticky="w", padx=(0, 12), pady=7)
+
+    anno_dataset = tk.StringVar()
+    annotate_field(2, "Dataset / images folder")
+    ttk.Entry(annotate_tab, textvariable=anno_dataset).grid(row=2, column=1,
+                                                             sticky="ew", pady=7)
+    def browse_anno_dataset():
+        folder = filedialog.askdirectory(parent=root, title="Select images or dataset root")
+        if folder:
+            anno_dataset.set(folder)
+    ttk.Button(annotate_tab, text="Browse…", command=browse_anno_dataset).grid(
+        row=2, column=2, padx=(10, 0))
+
+    annotate_field(3, "Model source")
+    anno_model_source = tk.StringVar(value="Ultralytics pretrained")
+    ttk.Combobox(annotate_tab, state="readonly", textvariable=anno_model_source,
+                 values=("Ultralytics pretrained", "Trained .pt file"), width=23).grid(
+        row=3, column=1, sticky="w", pady=7)
+    annotate_field(4, "Pretrained model")
+    anno_pretrained = tk.StringVar(value="yolo11l.pt")
+    model_options = tuple(_build_model_filename(v, z)
+                          for v in ("8", "11", "26") for z in ("n", "s", "m", "l", "x"))
+    anno_pretrained_widget = ttk.Combobox(annotate_tab, textvariable=anno_pretrained,
+                                          values=model_options, state="readonly", width=23)
+    anno_pretrained_widget.grid(row=4, column=1, sticky="w", pady=7)
+    annotate_field(5, "Trained weights (.pt)")
+    anno_weights = tk.StringVar()
+    anno_weights_widget = ttk.Entry(annotate_tab, textvariable=anno_weights)
+    anno_weights_widget.grid(row=5, column=1, sticky="ew", pady=7)
+    def browse_anno_model():
+        chosen = filedialog.askopenfilename(parent=root, title="Choose trained YOLO weights",
+                                             filetypes=[("YOLO weights", "*.pt")])
+        if chosen:
+            anno_weights.set(chosen)
+    anno_browse_widget = ttk.Button(annotate_tab, text="Browse…", command=browse_anno_model)
+    anno_browse_widget.grid(row=5, column=2, padx=(10, 0))
+
+    def change_model_source(*_args):
+        custom = anno_model_source.get() == "Trained .pt file"
+        anno_pretrained_widget.configure(state="disabled" if custom else "readonly")
+        anno_weights_widget.configure(state="normal" if custom else "disabled")
+        anno_browse_widget.configure(state="normal" if custom else "disabled")
+    anno_model_source.trace_add("write", change_model_source)
+    change_model_source()
+
+    annotate_field(6, "Confidence (conf)")
+    anno_conf = tk.StringVar(value="0.25")
+    ttk.Entry(annotate_tab, textvariable=anno_conf, width=16).grid(row=6, column=1, sticky="w")
+    annotate_field(7, "NMS IoU (iou)")
+    anno_iou = tk.StringVar(value="0.70")
+    ttk.Entry(annotate_tab, textvariable=anno_iou, width=16).grid(row=7, column=1, sticky="w")
+    annotate_field(8, "Maximum detections (max_det)")
+    anno_max_det = tk.StringVar(value="300")
+    ttk.Entry(annotate_tab, textvariable=anno_max_det, width=16).grid(row=8, column=1, sticky="w")
+    annotate_field(9, "Inference image size")
+    anno_imgsz = tk.StringVar(value="1280")
+    ttk.Entry(annotate_tab, textvariable=anno_imgsz, width=16).grid(row=9, column=1, sticky="w")
+    annotate_field(10, "Inference device")
+    anno_device = tk.StringVar(value="auto")
+    ttk.Combobox(annotate_tab, state="readonly", textvariable=anno_device,
+                 values=("auto", "0", "cpu"), width=16).grid(row=10, column=1, sticky="w")
+    annotate_field(11, "Optional labels output")
+    anno_labels = tk.StringVar()
+    ttk.Entry(annotate_tab, textvariable=anno_labels).grid(row=11, column=1,
+                                                            sticky="ew", pady=7)
+    def browse_anno_labels():
+        chosen = filedialog.askdirectory(parent=root, title="Choose output labels folder")
+        if chosen:
+            anno_labels.set(chosen)
+    ttk.Button(annotate_tab, text="Browse…", command=browse_anno_labels).grid(
+        row=11, column=2, padx=(10, 0))
+    ttk.Label(annotate_tab, text="Leave blank: sibling labels/ for images/, "
+              "or alongside images in a mixed folder.", foreground="#555555",
+              wraplength=680).grid(row=12, column=1, columnspan=2, sticky="w")
+    anno_overwrite = tk.BooleanVar(value=False)
+    ttk.Checkbutton(annotate_tab, variable=anno_overwrite,
+                    text="Overwrite existing annotation files (otherwise skip)").grid(
+        row=13, column=0, columnspan=3, sticky="w", pady=(12, 6))
+    ttk.Label(annotate_tab, text="Important: pretrained COCO class IDs may not match "
+              "your dataset's class IDs. Check class mappings and manually review "
+              "generated labels before training.", foreground="#B53A43",
+              wraplength=700).grid(row=14, column=0, columnspan=3, sticky="w", pady=(8, 4))
+
     chosen_settings = {}
 
     def submit():
+        if notebook.select() == str(preannotate_page):
+            from preannotate_dataset import _settings
+            annotation = {
+                "dataset_folder": anno_dataset.get().strip().strip('"'),
+                "model": (anno_weights.get().strip().strip('"')
+                          if anno_model_source.get() == "Trained .pt file"
+                          else anno_pretrained.get()),
+                "conf": anno_conf.get(), "iou": anno_iou.get(),
+                "max_det": anno_max_det.get(), "imgsz": anno_imgsz.get(),
+                "device": anno_device.get(),
+                "labels_folder": anno_labels.get().strip().strip('"') or None,
+                "overwrite": anno_overwrite.get(),
+            }
+            try:
+                _settings(**annotation)
+            except (ValueError, OSError) as exc:
+                messagebox.showerror("Invalid pre-annotation settings", str(exc), parent=root)
+                return
+            if embedded:
+                if on_preannotate is not None:
+                    on_preannotate(annotation)
+            else:
+                chosen_settings["preannotate"] = annotation
+                root.destroy()
+            return
         mode = operation.get()
         existing_info = None
         try:
@@ -1476,6 +1773,7 @@ def _all_in_one_gui(parent=None, on_submit=None):
                     "model_path": model_weights or None, "epochs": epochs,
                     "time": hours, "batch": n_batch, "imgsz": n_imgsz,
                     "cache": cache.get(), "workers": n_workers,
+                    "cleanup_disk_cache": cleanup_disk_cache.get(),
                     "cls_weight": selected_cls_weight,
                     "device": next(k for k, v in choices.items() if v == device.get()),
                     "auto_install_cuda": cuda_install.get(),
@@ -1512,19 +1810,28 @@ def _all_in_one_gui(parent=None, on_submit=None):
         notebook.tab(split_page, state="disabled" if is_existing else "normal")
         if is_existing:
             existing_frame.pack(fill="x", pady=(0, 8), after=mode_bar)
-            notebook.select(train_page)
+            if notebook.select() != str(preannotate_page):
+                notebook.select(train_page)
         else:
             existing_frame.pack_forget()
             if not results_custom and sources:
                 fill_defaults()
-            if not is_training or notebook.select() == str(train_page):
+            if notebook.select() != str(preannotate_page) and (
+                    not is_training or notebook.select() == str(train_page)):
                 notebook.select(split_page)
-        launch_button.configure(text={
-            "split_train": "Create splits + train",
-            "split_only": "Create split lists",
-            "train_existing": "Train existing dataset",
-        }[mode])
+        update_action_button()
 
+    def update_action_button(_event=None):
+        if notebook.select() == str(preannotate_page):
+            launch_button.configure(text="Start pre-annotation")
+        else:
+            launch_button.configure(text={
+                "split_train": "Create splits + train",
+                "split_only": "Create split lists",
+                "train_existing": "Train existing dataset",
+            }[operation.get()])
+
+    notebook.bind("<<NotebookTabChanged>>", update_action_button, add="+")
     operation.trace_add("write", update_launch)
     update_launch()
     if embedded:
@@ -1594,6 +1901,7 @@ def autosplit_and_train_model(
     batch=4, imgsz=640, device="auto", auto_install_cuda=False,
     project=None, run_name="train", compact_progress=True, cls_weight=0.5,
     existing_data_yaml=None, cache="disk", workers=8,
+    cleanup_disk_cache=True, cache_cleanup_manifest=None,
 ):
     """Create YOLO split lists, split and train, or train an existing split.
 
@@ -1610,6 +1918,9 @@ def autosplit_and_train_model(
         if settings is None:
             print("Cancelled: no split or training started.")
             return None
+        if "preannotate" in settings:
+            from preannotate_dataset import preannotate_dataset
+            return preannotate_dataset(**settings["preannotate"])
         return autosplit_and_train_model(**settings)
     if existing_mode and dataset_paths:
         raise ValueError("Choose either existing_data_yaml or source folders, not both.")
@@ -1633,6 +1944,8 @@ def autosplit_and_train_model(
             raise ValueError("Cache must be 'off', 'ram', or 'disk'.")
         if isinstance(workers, bool) or not isinstance(workers, int) or workers < 0:
             raise ValueError("Workers must be a non-negative integer.")
+        if not isinstance(cleanup_disk_cache, bool):
+            raise ValueError("Disk cache cleanup must be enabled or disabled.")
         if time is not None:
             time = float(time)
             if not math.isfinite(time) or time <= 0:
@@ -1723,8 +2036,23 @@ def autosplit_and_train_model(
     else:
         print(f"Training {model_file} on {sum(split_result['counts'].values())} images")
     print(f"Data: {yaml_file} | device: {selected_device} | image size: {imgsz} "
-          f"| cache: {cache} | workers: {workers} | cls: {cls_weight:g}")
-    trained = _train_with_compact_progress(YOLO(model_file), kwargs, compact_progress)
+          f"| cache: {cache} | workers: {workers} | cls: {cls_weight:g} "
+          f"| delete new disk cache: {cleanup_disk_cache and cache == 'disk'}")
+    new_cache_files = set()
+    manifest = cache_cleanup_manifest if cache == "disk" and cleanup_disk_cache else None
+    if cache == "disk" and cleanup_disk_cache:
+        all_caches = _disk_cache_candidates(yaml_file, config)
+        new_cache_files = {path for path in all_caches if not path.exists()}
+        print(f"Disk cache cleanup armed: {len(new_cache_files)} new-file candidates; "
+              f"{len(all_caches) - len(new_cache_files)} existing .npy file(s) protected.",
+              flush=True)
+        if manifest is not None:
+            _save_disk_cache_manifest(manifest, new_cache_files)
+    try:
+        trained = _train_with_compact_progress(YOLO(model_file), kwargs, compact_progress)
+    finally:
+        if cache == "disk" and cleanup_disk_cache:
+            _remove_new_disk_cache(new_cache_files, manifest)
     print(f"Training finished. Results saved in: {project_dir}")
     return {"split": split_result, "training": trained, "dataset_yaml": str(yaml_file)}
 

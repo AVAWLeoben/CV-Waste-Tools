@@ -473,7 +473,8 @@ class Studio:
                                           style="Danger.TButton", command=self.stop_training,
                                           state="disabled")
             self.stop_button.pack(side="right")
-            _, self.train_button = _all_in_one_gui(train, self.start_training)
+            _, self.train_button = _all_in_one_gui(
+                train, self.start_training, on_preannotate=self.start_preannotation)
             self.train_button.configure(style="Accent.TButton")
             self.audit_gui = AuditGUI(self._scroll_host(audit), embedded=True,
                                       on_log=lambda message: self.log_line("audit", message))
@@ -489,21 +490,34 @@ class Studio:
             return
         self.ready = True
         self._show("train")
-        self.log_line("train", "Ready. Select Split + train, Split only, or Train existing split.")
+        self.log_line("train", "Ready. Split, train an existing dataset, or pre-annotate images.")
         self.log_line("audit", "Ready. The audit reads annotations without modifying them.")
         self.log_line("recall", "Ready. Cached predictions can be reused for new precision thresholds.")
 
     def start_training(self, settings):
+        self._start_job(settings, "train")
+
+    def start_preannotation(self, settings):
+        self._start_job(settings, "preannotate")
+
+    def _start_job(self, settings, kind):
         if self.train_job is not None:
-            messagebox.showwarning("Training in progress", "A split/training job is already running.", parent=self.root)
+            messagebox.showwarning("Job in progress", "Another dataset job is running.", parent=self.root)
             return
         logdir = APP_DIR / "logs"
         logdir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        logfile = logdir / f"train_{stamp}.log"
-        config = logdir / f"train_{stamp}_settings.json"
-        config.write_text(json.dumps(settings, indent=2, default=str), encoding="utf-8")
-        cmd = [str(env_python(self.env)), "-u", str(APP_DIR / "run_training_job.py"), str(config)]
+        logfile = logdir / f"{kind}_{stamp}.log"
+        config = logdir / f"{kind}_{stamp}_settings.json"
+        submitted = dict(settings)
+        cache_manifest = None
+        if (kind == "train" and submitted.get("cache") == "disk" and
+                submitted.get("cleanup_disk_cache", True)):
+            cache_manifest = logdir / f"train_{stamp}_disk_cache_manifest.json"
+            submitted["cache_cleanup_manifest"] = str(cache_manifest)
+        config.write_text(json.dumps(submitted, indent=2, default=str), encoding="utf-8")
+        worker = "run_preannotation_job.py" if kind == "preannotate" else "run_training_job.py"
+        cmd = [str(env_python(self.env)), "-u", str(APP_DIR / worker), str(config)]
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         try:
             with logfile.open("w", encoding="utf-8") as stream:
@@ -515,11 +529,13 @@ class Studio:
             messagebox.showerror("Could not start training", str(exc), parent=self.root)
             return
         self.train_job = {"process": proc, "log": logfile, "offset": 0,
-                          "pending": "", "stopping": False}
+                          "pending": "", "stopping": False, "cache_manifest": cache_manifest}
         self.train_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.train_state.set("Running " + ("existing dataset training" if settings.get("existing_data_yaml") else
-                                          "split + training" if settings["train_after_split"] else "split only"))
+        self.train_state.set("Running " + (
+            "pre-annotation" if kind == "preannotate" else
+            "existing dataset training" if settings.get("existing_data_yaml") else
+            "split + training" if settings["train_after_split"] else "split only"))
         self.log_line("train", "Started job " + str(proc.pid) + " · " + str(logfile))
         self.log_line("train", "Settings saved to " + str(config))
 
@@ -562,6 +578,17 @@ class Studio:
                         self.log_line("train", line)
             returncode = proc.poll()
             if returncode is not None and job["log"].stat().st_size <= job["offset"]:
+                manifest = job.get("cache_manifest")
+                if manifest is not None and manifest.is_file():
+                    try:
+                        from train_and_split_tool_GUI import cleanup_disk_cache_manifest
+                        count, errors = cleanup_disk_cache_manifest(manifest)
+                        self.log_line("train", f"Post-stop disk cache cleanup: {count} .npy files removed.")
+                        if errors:
+                            self.log_line("train", f"WARNING: {len(errors)} cache files not removed; "
+                                          f"manifest retained: {manifest}")
+                    except (OSError, ValueError, KeyError) as exc:
+                        self.log_line("train", f"WARNING: cache cleanup could not complete: {exc}")
                 if job["pending"].strip():
                     self.log_line("train", job["pending"])
                 if job["stopping"]:

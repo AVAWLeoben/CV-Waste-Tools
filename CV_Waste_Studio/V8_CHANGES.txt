@@ -1,0 +1,40 @@
+CV Waste Studio v8 — 27 October 2026
+=====================================
+
+1. Dataset & Split folder selection
+- Add folder opens the native OS folder picker directly (one dialog).
+- Add pasted path(s) accepts one full path or several separated by semicolons.
+- Existing sources remain in the list; images/ + labels/ are normalized to one root.
+- All splitting and existing-dataset logic remains unchanged.
+
+2. New tab: 3. Pre-Annotate
+- Accepts a pretrained YOLO detection model (8/11/26, sizes n/s/m/l/x)
+  or a local trained YOLO .pt file.
+- Inputs: dataset or images folder, confidence, IoU, max detections,
+  inference image size, device, optional label output, overwrite toggle.
+- Writes detection boxes as YOLO class/x-center/y-center/width/height .txt
+  annotations, using normalized coordinates.
+- Dataset root with images/: writes labels into labels/ with matching
+  relative subfolder structure. Flat/mixed folders get labels next to images.
+- Skips existing label files by default. Does not rewrite split lists,
+  images, source dataset YAML or class definitions.
+- Runs in a separate Python worker using the verified Conda environment,
+  with saved settings, activity logs, job status and Stop control.
+- Any generated labels should be manually reviewed. Pretrained COCO class
+  IDs are NOT remapped to a custom dataset taxonomy.
+
+Preserved and restored features
+- The original user branding assets are included, along with the smaller
+  Windows/sidebar images absent from the uploaded project ZIP.
+- The previous v7 disk-cache automatic cleanup option is retained,
+  including on-error and forced-stop cleanup, and its tests.
+
+Verification
+- 21 tests passed using the supplied and new test modules.
+- Python syntax checks passed for changed modules and worker.
+- Tk GUI tab/layout checked in a virtual 1290×845 desktop.
+- Pre-annotation submission callback validated.
+- Actual GPU inference on the user's machine was not run.
+
+Start: use START_CV_WASTE_TOOLS.vbs or recreate the shortcut by running
+CREATE_CV_WASTE_STUDIO_SHORTCUTS.vbs.

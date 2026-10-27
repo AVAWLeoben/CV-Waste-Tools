@@ -10,6 +10,9 @@ THE THREE TOOLS ARE RETAINED
 -----------------------------------------
 
 01  DATASETS & TRAINING
+    - Add a source folder using one native folder dialog (no secondary browser).
+      Repeat for additional folders, or paste semicolon-separated full folder paths
+      in the same Split tab and select Add pasted path(s).
     - Use multiple source dataset folders (mixed images/labels or YOLO layouts).
     - Produce train/val/test path lists, with configurable percentages.
     - Optionally filter images with empty annotations.
@@ -20,10 +23,26 @@ THE THREE TOOLS ARE RETAINED
       autosplit_data.yaml or its containing folder. Train/val and class names
       must be defined. The selected YAML is validated but never changed.
     - Train/fine-tune a YOLO 8 / 11 / 26 model with the same training options.
+    - In the training tab, disk .npy image caches can be deleted automatically
+      on completion or job failure; only newly created image caches are deleted.
     - Existing training settings: model size, custom weights, duration in
       epochs/hours, batch, image size, CLS loss weight, device, output and name.
     - Files are referenced by paths, not copied or moved.
     - Selecting sibling images/ and labels/ folders treats them as one dataset.
+    - Tab 3: Pre-Annotate can generate object-detection YOLO bounding-box
+      labels (.txt) from a trained .pt model or Ultralytics pretrained model.
+      Parameters: conf, iou, max_det, imgsz and auto/GPU 0/CPU device.
+      Select a dataset root containing images/, the images/ folder itself,
+      or a flat/mixed image folder. With standard images/ + labels/ layouts,
+      generated labels go under the sibling labels/ folder, retaining the
+      relative subfolder structure. For flat image folders the .txt files
+      go next to images unless you supply an explicit label output folder.
+      Existing labels are SKIPPED by default. Enable Overwrite explicitly
+      to replace them. Predictions may need manual correction. Pretrained
+      COCO class IDs MUST be checked/remapped to your dataset's YAML names
+      before training; the tool does not translate class IDs automatically.
+      Pre-annotation runs headlessly through its own job worker and reports
+      to the same activity console and Stop running job button.
     - Splitting/training runs in a background *process*, not another window;
       the UI remains responsive. Stop running job is available in this view.
       Training output is saved to a complete timestamped file in logs/.
