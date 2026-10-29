@@ -85,7 +85,12 @@ class DatasetWorkflows(unittest.TestCase):
             backend.autosplit_and_train_model(
                 existing_data_yaml=str(self.yaml), device="cpu", cache="off", workers=0,
                 project=str(self.root / "results"), compact_progress=False,
+                augmentation={"mosaic": 0.3, "degrees": 10, "close_mosaic": 10},
             )
+        self.assertEqual(received[0]["mosaic"], 0.3)
+        self.assertEqual(received[0]["degrees"], 10)
+        self.assertEqual(received[0]["close_mosaic"], 10)
+        self.assertNotIn("hsv_s", received[0])
         self.assertEqual(received[0]["cache"], False)
         self.assertEqual(received[0]["workers"], 0)
 

@@ -1,0 +1,17 @@
+Training augmentation menu
+
+Open Training > Augmentation… to edit settings in a separate dialog.
+Geometry, Colour, and Image mixing tabs keep the main training page compact.
+Library defaults clears all overrides. Blank fields inherit defaults from your
+installed Ultralytics version. Gentle handheld is an experimental preset.
+Apply saves changes for the current session; Cancel/Escape discards dialog edits.
+Settings are included in submitted background jobs and logged before training.
+Ultralytics records effective settings in the training run args.yaml.
+This menu does not change epochs, optimizer, image size or dataset splits.
+
+Update: extract this folder, then copy augmentation_options.py and the updated
+train_and_split_tool_GUI.py into your existing application folder together.
+Keep your datasets and results. Start the application normally.
+
+Validation: new augmentation tests and existing split/backend tests pass.
+Desktop visual testing was unavailable in the build runtime (missing Tcl/Tk).

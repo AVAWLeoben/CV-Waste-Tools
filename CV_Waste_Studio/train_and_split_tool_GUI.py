@@ -56,6 +56,9 @@ def _normalize_device_choice(device):
     raise ValueError(f"Invalid training device: {device!r}. Choose 'auto', 0, or 'cpu'.")
 
 
+from augmentation_options import validate_augmentation, edit_augmentation
+
+
 def _validate_cls_weight(value):
     """Parse a non-negative, finite YOLO classification-loss weight."""
     import math
@@ -1555,6 +1558,17 @@ def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
     cache.trace_add("write", update_cache_cleanup)
     update_cache_cleanup()
 
+    augmentation = {}
+    augmentation_summary = tk.StringVar(value="Library defaults")
+    def apply_augmentation(values):
+        augmentation.clear()
+        augmentation.update(values)
+        augmentation_summary.set(f"{len(values)} custom settings" if values else "Library defaults")
+    ttk.Button(train_tab, text="Augmentation…", command=lambda: edit_augmentation(
+        root, augmentation, apply_augmentation)).grid(row=20, column=0, sticky="w", pady=(12, 6))
+    ttk.Label(train_tab, textvariable=augmentation_summary).grid(
+        row=20, column=1, columnspan=2, sticky="w", padx=(8, 0))
+
     # 3. Pre-Annotate: independent of the selected split/training workflow.
     preannotate_page.columnconfigure(0, weight=1)
     annotate_canvas = tk.Canvas(preannotate_page, highlightthickness=0, bd=0)
@@ -1775,6 +1789,7 @@ def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
                     "cache": cache.get(), "workers": n_workers,
                     "cleanup_disk_cache": cleanup_disk_cache.get(),
                     "cls_weight": selected_cls_weight,
+                    "augmentation": validate_augmentation(augmentation),
                     "device": next(k for k, v in choices.items() if v == device.get()),
                     "auto_install_cuda": cuda_install.get(),
                     "project": project_path, "run_name": run_name.get().strip() or "train",
@@ -1901,7 +1916,7 @@ def autosplit_and_train_model(
     batch=4, imgsz=640, device="auto", auto_install_cuda=False,
     project=None, run_name="train", compact_progress=True, cls_weight=0.5,
     existing_data_yaml=None, cache="disk", workers=8,
-    cleanup_disk_cache=True, cache_cleanup_manifest=None,
+    cleanup_disk_cache=True, cache_cleanup_manifest=None, augmentation=None,
 ):
     """Create YOLO split lists, split and train, or train an existing split.
 
@@ -1930,6 +1945,7 @@ def autosplit_and_train_model(
         weights = tuple(float(w) for w in weights)
         if train_after_split and len(weights) == 3 and weights[1] <= 0:
             raise ValueError("Training requires a validation split above zero.")
+    augmentation = validate_augmentation(augmentation)
     if train_after_split:
         batch = int(batch)
         imgsz = int(imgsz)
@@ -2027,6 +2043,9 @@ def autosplit_and_train_model(
         "name": str(run_name).strip() or "train", "cls": cls_weight,
         "cache": False if cache == "off" else cache, "workers": workers,
     }
+    kwargs.update(augmentation)
+    if augmentation:
+        print(f"Augmentation overrides: {augmentation}")
     if time is not None:
         kwargs["time"] = time
     else:
