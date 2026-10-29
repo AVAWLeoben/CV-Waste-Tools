@@ -1,0 +1,43 @@
+CV WASTE STUDIO v10 — AFTER-TRAINING RESULTS
+===========================================
+
+New left-sidebar section: 04 Training results
+
+After successful YOLO training, Studio automatically opens this dashboard
+using the exact output directory reported by the native Ultralytics trainer.
+If the job fails, it stays on the training page and retains the error log.
+
+You can also choose an earlier run from the Recent run list, Refresh runs,
+or select any existing Ultralytics run folder containing results.csv.
+Recent run discovery uses project folders from saved Studio training settings.
+
+Dashboard tabs:
+1. Interactive training curves — train and validation losses, precision,
+   recall, mAP50 and mAP50-95. Hover a chart for blue highlighting, click to
+   expand, and hover the expanded plot to see actual recorded epoch values.
+   Press Esc or click × to collapse it.
+2. Validation plots & examples — view saved confusion matrices, PR, F1,
+   precision, recall, original results.png, and validation prediction JPGs
+   where they exist. Use + / - to zoom; no external folder navigation needed.
+3. Epoch metrics table — sortable exact epoch metrics read from results.csv.
+
+The header cards show the highest *recorded validation* mAP50-95, precision
+and recall at that peak, final mAP50, and epoch count; best.pt and last.pt
+presence is also shown. Note that the highest logged validation mAP epoch is
+not necessarily the checkpoint chosen by the Ultralytics fitness function.
+
+The viewer is read-only. It does NOT rerun validation or inference, update
+training files, or change the data loader, cache, progress callbacks, or
+YOLO.train() settings. Validation results on the same validation split are
+not an independent estimate of performance on entirely unseen data. For an
+independent estimate use a held-out test split / a separate evaluation run.
+
+Data requirement: results.csv is mandatory for re-plotting curves. Optional
+figures are read only if Ultralytics saved them. Figure display uses Pillow
+(typically installed by Ultralytics); if absent, curves and metrics still
+work but image previews show a readable error.
+
+Tests: 55 automated tests passed on Linux with Xvfb; v10 dashboard smoke
+checked in the full Studio at 1290x845, including plot and epoch-table tabs.
+GPU training and Windows-specific behaviours require verification on the
+user's machine.

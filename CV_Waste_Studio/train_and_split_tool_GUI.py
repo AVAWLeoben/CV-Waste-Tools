@@ -1537,7 +1537,7 @@ def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
     ttk.Entry(train_tab, textvariable=run_name).grid(row=15, column=1, sticky="ew")
     compact_progress = tk.BooleanVar(value=True)
     ttk.Checkbutton(train_tab, variable=compact_progress,
-                    text="Compact training progress (one update per epoch)").grid(
+                    text="Compact console log (live progress and graphs still update)").grid(
         row=16, column=0, columnspan=3, sticky="w", pady=(12, 6))
     ttk.Label(train_tab, text="Training creates model checkpoints and metrics in the results folder.",
               foreground="#555555").grid(row=17, column=0, columnspan=3,
@@ -1857,55 +1857,89 @@ def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
 
 
 def _train_with_compact_progress(model, train_args, compact_progress=True):
-    """Suppress Ultralytics per-batch tqdm redraws, reporting once per epoch.
+    """Run native Ultralytics training, reporting throttled per-batch progress.
 
-    Patches only the trainer/validator progress bar constructors during this
-    single synchronous model.train() call. Warnings, exceptions and other
-    important logging stay visible, and the originals are restored afterward.
+    Compact mode suppresses only the console tqdm bars. Ultralytics performs
+    the same training and dataloading in both modes. Callbacks are registered
+    for the duration of one model.train() invocation and removed afterward.
     """
-    if not compact_progress:
-        return model.train(**train_args)
-
+    import time as _clock
     from contextlib import ExitStack
     from unittest.mock import patch
     from functools import partial
-    import ultralytics.engine.trainer as trainer_module
-    import ultralytics.engine.validator as validator_module
+    from training_log import format_iteration_progress
+
+    state = {"epoch": 0, "epochs": 0, "iteration": 0, "iterations": 0,
+             "last_emit": 0.0}
+
+    def emit_progress(force=False):
+        if not state["iterations"]:
+            return
+        now = _clock.monotonic()
+        if force or now - state["last_emit"] >= 0.5:
+            print(format_iteration_progress(
+                state["epoch"], state["epochs"], state["iteration"],
+                state["iterations"]), flush=True)
+            state["last_emit"] = now
+
+    def epoch_start(trainer):
+        state["epoch"] = int(trainer.epoch) + 1
+        state["epochs"] = int(trainer.epochs)
+        loader = getattr(trainer, "train_loader", None)
+        state["iterations"] = len(loader) if loader is not None else 0
+        state["iteration"] = 0
+        emit_progress(force=True)
+
+    def batch_end(trainer):
+        state["iteration"] += 1
+        emit_progress(force=state["iteration"] >= state["iterations"])
 
     def epoch_summary(trainer):
-        epoch = getattr(trainer, "epoch", -1) + 1
-        total = getattr(trainer, "epochs", "?")
-        parts = [f"Epoch {epoch}/{total} complete"]
-        losses = getattr(trainer, "tloss", None)
-        if isinstance(losses, dict) and losses:
-            formatted = []
-            for name, loss in losses.items():
-                try:
-                    formatted.append(f"{name}={float(loss):.4f}")
-                except (TypeError, ValueError):
-                    continue
-            if formatted:
-                parts.append(" ".join(formatted))
-        metrics = getattr(trainer, "metrics", None)
-        if isinstance(metrics, dict):
-            for key in ("metrics/mAP50(B)", "metrics/mAP50-95(B)"):
-                if key in metrics:
-                    try:
-                        parts.append(f"{key.split('/')[-1]}={float(metrics[key]):.4f}")
-                    except (TypeError, ValueError):
-                        pass
-        print(" | ".join(parts), flush=True)
-
-    if hasattr(model, "add_callback"):
-        model.add_callback("on_fit_epoch_end", epoch_summary)
+        from training_log import epoch_metrics_from_trainer, format_epoch_metrics, loss_summary
+        event = epoch_metrics_from_trainer(trainer)
+        # Always send epoch metrics to the live graph, even in non-compact mode.
+        print(format_epoch_metrics(event), flush=True)
+        if compact_progress:
+            epoch, total = event["epoch"], event["epochs"]
+            print(f"Training | epoch={epoch}/{total} | {loss_summary(trainer)}", flush=True)
+            values = []
+            for key, label in (("metrics/precision(B)", "precision"), ("metrics/recall(B)", "recall"),
+                               ("metrics/mAP50(B)", "mAP50"), ("metrics/mAP50-95(B)", "mAP50–95"),
+                               ("val/box_loss", "box_loss"), ("val/cls_loss", "cls_loss"),
+                               ("val/dfl_loss", "dfl_loss")):
+                if key in event["metrics"]:
+                    values.append(f"{label}={event['metrics'][key]:.4f}")
+            if values:
+                print(f"Validation | epoch={epoch}/{total} | " + " | ".join(values), flush=True)
 
     with ExitStack() as stack:
-        for module in (trainer_module, validator_module):
-            original = getattr(module, "TQDM", None)
-            if original is not None:
-                # Passing disable=True prevents progress updates from printing
-                # but preserves tqdm's iteration and set_description interface.
-                stack.enter_context(patch.object(module, "TQDM", partial(original, disable=True)))
+        if hasattr(model, "add_callback"):
+            callbacks = (("on_train_epoch_start", epoch_start),
+                         ("on_train_batch_end", batch_end),
+                         ("on_fit_epoch_end", epoch_summary))
+            for event, callback in callbacks:
+                model.add_callback(event, callback)
+            if hasattr(model, "callbacks") and isinstance(model.callbacks, dict):
+                def remove_callbacks():
+                    for event, callback in callbacks:
+                        entries = model.callbacks.get(event, [])
+                        if callback in entries:
+                            entries.remove(callback)
+                stack.callback(remove_callbacks)
+
+        if compact_progress:
+            import ultralytics.engine.trainer as trainer_module
+            import ultralytics.engine.validator as validator_module
+            from ultralytics.utils import LOGGER
+            from training_log import ReadableTrainingFilter
+            formatter = ReadableTrainingFilter()
+            LOGGER.addFilter(formatter)
+            stack.callback(LOGGER.removeFilter, formatter)
+            for module in (trainer_module, validator_module):
+                original = getattr(module, "TQDM", None)
+                if original is not None:
+                    # Disable progress printing, not tqdm iteration or training.
+                    stack.enter_context(patch.object(module, "TQDM", partial(original, disable=True)))
         return model.train(**train_args)
 
 
@@ -2068,7 +2102,12 @@ def autosplit_and_train_model(
         if manifest is not None:
             _save_disk_cache_manifest(manifest, new_cache_files)
     try:
-        trained = _train_with_compact_progress(YOLO(model_file), kwargs, compact_progress)
+        training_model = YOLO(model_file)
+        trained = _train_with_compact_progress(training_model, kwargs, compact_progress)
+        run_dir = getattr(getattr(training_model, "trainer", None), "save_dir", None)
+        if run_dir is not None:
+            from training_log import format_training_run_dir
+            print(format_training_run_dir(str(run_dir)), flush=True)
     finally:
         if cache == "disk" and cleanup_disk_cache:
             _remove_new_disk_cache(new_cache_files, manifest)

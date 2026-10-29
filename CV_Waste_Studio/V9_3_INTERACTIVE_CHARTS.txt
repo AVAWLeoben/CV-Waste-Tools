@@ -1,0 +1,17 @@
+CV Waste Studio v9.3 - Interactive Live Training Graphs
+
+Four live metrics plots in the Activity area now include numeric epoch ticks
+and a dot at every recorded epoch value. Lines connect the actual measurements.
+
+Move the mouse over a plot to see a blue hover halo and hand cursor. Click
+a plot to animate it into a single enlarged view that covers the other three.
+Click the small X in the upper-right corner, or press Escape while the graph
+has keyboard focus, to return to the four-plot layout.
+
+Charts continue to read epoch summaries emitted by the existing Ultralytics
+training callbacks. They update after each completed epoch. The existing
+in-epoch iteration progress bar continues to update independently.
+
+This update changes only training_charts.py, the Activity header hint in
+greenplast_launcher.py, and adds interaction tests. It does not change the
+Ultralytics training API, workers, disk cache, splitting, or prediction logic.

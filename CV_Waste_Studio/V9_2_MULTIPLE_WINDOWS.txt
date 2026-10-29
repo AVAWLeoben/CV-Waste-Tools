@@ -1,0 +1,26 @@
+CV Waste Studio v9.2 — Optional additional windows
+================================================
+
+Run CREATE_CV_WASTE_STUDIO_SHORTCUTS.vbs to create two launch choices:
+
+  CV Waste Studio                → focus the already-running window
+  CV Waste Studio - New Window   → start another independent UI window
+
+Both shortcuts launch the same START_CV_WASTE_TOOLS.vbs. The new-window
+shortcut adds --new-instance to the VBS arguments. This sets a process-only
+environment flag and explicitly passes --new-instance when the Conda bootstrap
+relaunches the GUI into the managed environment.
+
+Manual invocation:
+  wscript.exe "START_CV_WASTE_TOOLS.vbs" --new-instance
+
+Each window has its own activity log file and training job process. Jobs
+continue to share the same Conda environment and disk datasets. Never train
+concurrently into the same run/output directory, and avoid simultaneous
+cache creation/cleanup on the same source images. Multiple 1280px jobs may
+exhaust RAM, GPU VRAM, or disk bandwidth. Prefer separate datasets/output
+folders for active jobs.
+
+Normal launch and window focusing remain as in v9.1. No changes to the
+Ultralytics training API, dataset splitting, audits, pre-annotation, or
+model evaluation.

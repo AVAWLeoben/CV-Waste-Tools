@@ -1,0 +1,30 @@
+CV Waste Studio v9 — Live training graphs and iteration progress
+=================================================================
+
+The activity dock on the Datasets & training page now has two independent
+controls:
+  - Show graphs / Hide graphs: four live YOLO training curves.
+  - Show log / Hide log: text activity output and warnings.
+
+During training, live graphs are shown automatically and the text log is
+collapsed to make room. You can show the log whenever you need it; the complete
+log is always saved to the normal logs folder. The graph displays:
+  1. Training box / classification / DFL loss
+  2. Validation box / classification / DFL loss
+  3. Precision and recall
+  4. mAP@50 and mAP@50-95
+
+Curves update after each completed epoch, when Ultralytics has computed the
+metrics. The separate iteration progress bar updates while batches are running,
+including when Compact console log is enabled. The chart collects measurements
+from native Ultralytics callbacks, passed via machine-readable messages in the
+job log, and uses a lightweight Tkinter canvas. No external plotting package
+is needed. Ultralytics continues producing its normal results.csv/results.png.
+
+No training or dataloader implementation has been replaced; jobs still call
+YOLO(model_file).train(**kwargs) and use Ultralytics' dataloader. Disk-cache
+cleanup, 8-worker settings, existing dataset splits, pre-annotation, and audit
+remain unchanged.
+
+Verification: see tests/test_live_training_charts.py, tests/test_training_log.py.
+This package has been tested without running a full real GPU training job.

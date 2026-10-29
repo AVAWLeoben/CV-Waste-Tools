@@ -1,0 +1,21 @@
+Training UI and log update
+
+Changes:
+- Latest epoch panel separates Training losses from Validation metrics.
+- Metrics use explicit names; image/object counts cannot be mistaken for losses.
+- Compact log handles tensor/list/dictionary loss formats.
+- Warnings, errors and exception tracebacks remain visible.
+- Auto-scroll can be disabled while inspecting output; Open logs opens saved logs.
+- Training/validation/warning/error text has distinct colours.
+- Augmentation dialog and existing training settings are preserved.
+
+Update your existing installation with these three files from this archive:
+  greenplast_launcher.py
+  train_and_split_tool_GUI.py
+  training_log.py (new)
+Keep augmentation_options.py from your existing updated app (also included here).
+Restart the app after any current training finishes. Do not overwrite datasets or results.
+The archive also contains the complete application for a fresh installation.
+
+Verification: 26 non-GUI tests pass. No model training was run.
+Desktop rendering and icon tests require Tcl/Tk, unavailable in the build environment.

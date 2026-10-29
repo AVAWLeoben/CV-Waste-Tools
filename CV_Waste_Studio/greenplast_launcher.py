@@ -22,6 +22,10 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from studio_branding import apply_window_icon, set_windows_app_id, sidebar_icon
+from training_charts import LiveMetricsGraph
+from training_results import TrainingResultsPanel
+from studio_single_instance import (another_instance_running, claim_gui_instance,
+                                    release_gui_instance, activate_existing_window)
 
 from greenplast_environment import (
     APP_DIR, EnvironmentManager, probe_env, cached_environment,
@@ -45,6 +49,7 @@ PAGE_TEXT = {
     "audit": ("Annotation audit", "Identify inconsistent labels and export review-ready CSV findings."),
     "recall": ("Precision / recall", "Evaluate recall at your required precision using reusable inference results."),
     "system": ("Environment & setup", "Verify the Conda environment, inspect GPU support and access logs."),
+    "results": ("Training results", "Explore completed Ultralytics runs, training curves and validation plots."),
 }
 
 
@@ -56,7 +61,8 @@ def _same_executable(a, b):
 
 
 class Studio:
-    def __init__(self, prepared=None):
+    def __init__(self, prepared=None, allow_multiple=False):
+        self.allow_multiple = allow_multiple
         set_windows_app_id()
         self.root = tk.Tk()
         apply_window_icon(self.root)
@@ -75,11 +81,12 @@ class Studio:
         self.pages = {}
         self.nav = {}
         self.logs = {key: deque(maxlen=1000) for key in PAGE_TEXT}
-        self.session_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.activity_paths = {key: APP_DIR / "logs" / f"studio_{key}_{self.session_stamp}.log"
                                for key in ("system", "audit", "recall")}
         self.train_job = None
         self.train_button = None
+        self.settings_expanded = False
         self.audit_gui = None
         self.recall_gui = None
         self._style()
@@ -154,6 +161,7 @@ class Studio:
             ("train", "01", "Datasets & training"),
             ("audit", "02", "Annotation audit"),
             ("recall", "03", "Precision / recall"),
+            ("results", "04", "Training results"),
         )
         for key, number, label in nav_items:
             self._nav_button(sidebar, key, f"{number}   {label}")
@@ -166,6 +174,7 @@ class Studio:
         self.nav_hint.pack(fill="x", padx=24, pady=(16, 28))
 
         work = tk.Frame(self.outer, bg=BG)
+        self.workspace = work
         work.pack(side="left", fill="both", expand=True)
         top = tk.Frame(work, bg=BG)
         top.pack(fill="x", padx=26, pady=(24, 15))
@@ -184,6 +193,7 @@ class Studio:
                                      font=("Segoe UI", 9, "bold"))
         self.status_label.pack(side="left")
         card = tk.Frame(work, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
+        self.page_card = card
         card.pack(fill="both", expand=True, padx=26, pady=(0, 12))
         self.content = tk.Frame(card, bg=SURFACE)
         self.content.pack(fill="both", expand=True)
@@ -197,13 +207,65 @@ class Studio:
         self.log_label = tk.Label(toolbar, text="· Split & train", bg=SURFACE,
                                   fg=MUTED, font=("Segoe UI", 9))
         self.log_label.pack(side="left", padx=(8, 0))
+        # Only shown while a dataset job is running. The training form can be
+        # restored temporarily without interrupting the job.
+        self.monitor_tools = tk.Frame(self.log_frame, bg="#F4F7FD")
+        self.monitor_label = tk.Label(self.monitor_tools, bg="#F4F7FD", fg=INK,
+                                      text="", font=("Segoe UI", 10, "bold"),
+                                      anchor="w")
+        self.monitor_label.pack(side="left", fill="x", expand=True, padx=(12, 4))
+        self.monitor_stop = ttk.Button(self.monitor_tools, text="Stop running job",
+                                       style="Danger.TButton", command=self.stop_training)
+        self.monitor_stop.pack(side="right", padx=(4, 10), pady=5)
+        self.settings_toggle = ttk.Button(self.monitor_tools, text="Show settings",
+                                          command=self.toggle_training_settings)
+        self.settings_toggle.pack(side="right", pady=5)
         ttk.Button(toolbar, text="Clear view", command=self.clear_log).pack(side="right")
+        self.graph_toggle = ttk.Button(toolbar, text="Show graphs", command=self.toggle_graph)
+        self.graph_toggle.pack(side="right", padx=(0, 8))
+        self.graph_visible = False
         self.log_toggle = ttk.Button(toolbar, text="Hide log", command=self.toggle_log)
         self.log_toggle.pack(side="right", padx=(0, 8))
+        self.follow_log = tk.BooleanVar(value=True)
+        ttk.Checkbutton(toolbar, text="Auto-scroll", variable=self.follow_log).pack(side="right", padx=8)
+        ttk.Button(toolbar, text="Open logs", command=self.open_logs_folder).pack(side="right", padx=4)
+        self.metric_frame = tk.Frame(self.log_frame, bg=SURFACE)
+        self.metric_frame.pack(fill="x", padx=16, pady=(0,6))
+        self.metric_summary = tk.Frame(self.metric_frame, bg=SURFACE)
+        self.metric_summary.pack(fill="x")
+        tk.Label(self.metric_summary, text="LATEST EPOCH · losses: lower is better · precision / recall / mAP: 0–1, higher is better",
+                 bg=SURFACE, fg=MUTED, font=("Segoe UI",8), anchor="w", justify="left", wraplength=820).pack(fill="x",pady=(0,3))
+        self.train_metrics = tk.StringVar(value="Training: waiting for epoch results")
+        self.val_metrics = tk.StringVar(value="Validation: waiting for evaluation")
+        tk.Label(self.metric_summary, textvariable=self.train_metrics, bg=SURFACE, fg="#2857A4",
+                 anchor="w", justify="left", wraplength=820, font=("Segoe UI",9)).pack(fill="x")
+        tk.Label(self.metric_summary, textvariable=self.val_metrics, bg=SURFACE, fg="#28704A",
+                 anchor="w", justify="left", wraplength=820, font=("Segoe UI",9)).pack(fill="x")
+        self.progress_head = tk.Frame(self.metric_frame, bg=SURFACE)
+        self.progress_head.pack(fill="x", pady=(7, 3))
+        tk.Label(self.progress_head, text="ITERATION PROGRESS", bg=SURFACE, fg=MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        self.iteration_label = tk.StringVar(value="Waiting for training batches")
+        tk.Label(self.progress_head, textvariable=self.iteration_label, bg=SURFACE,
+                 fg=INK, font=("Segoe UI", 9)).pack(side="right")
+        self.iteration_bar = ttk.Progressbar(self.metric_frame, mode="determinate", maximum=100)
+        self.iteration_bar.pack(fill="x", pady=(0, 5))
+        self.graph_frame = tk.Frame(self.metric_frame, bg=SURFACE)
+        header = tk.Frame(self.graph_frame, bg=SURFACE)
+        header.pack(fill="x", pady=(3, 4))
+        tk.Label(header, text="LIVE TRAINING CURVES", bg=SURFACE, fg=MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        tk.Label(header, text="Click any chart to enlarge · Esc or × to close · updates each epoch",
+                 bg=SURFACE, fg=MUTED, font=("Segoe UI", 8)).pack(side="right")
+        self.training_graph = LiveMetricsGraph(self.graph_frame)
+        self.training_graph.pack(fill="x")
+        self.metric_frame.bind('<Configure>', lambda e: [w.configure(wraplength=max(100,e.width))
+                               for w in self.metric_frame.winfo_children()
+                               if isinstance(w, tk.Label)])
         text_frame = tk.Frame(self.log_frame, bg=SURFACE)
         text_frame.pack(fill="x", padx=15, pady=(0, 13))
         self.log_text_frame = text_frame
-        self.log_text = tk.Text(text_frame, height=5, wrap="word", bd=0,
+        self.log_text = tk.Text(text_frame, height=3, wrap="word", bd=0,
                                 background="#F8FAFD", foreground="#31445D",
                                 font=("Consolas", 9), state="disabled", padx=10, pady=9,
                                 highlightthickness=0, selectbackground="#D9E4FB")
@@ -211,14 +273,16 @@ class Studio:
         self.log_scroll = ttk.Scrollbar(text_frame, command=self.log_text.yview)
         self.log_scroll.pack(side="right", fill="y")
         self.log_text.configure(yscrollcommand=self.log_scroll.set)
-        # Allocate the fixed activity dock before the expandable workspace.
-        # Otherwise the large training form can push the log off the window.
-        self.log_frame.pack_configure(side="bottom")
+        # The active workflow controls how much room the form and log receive.
+        # Training monitoring expands into the workspace, while initial setup
+        # leaves nearly the entire height to the settings form.
         card.pack_forget()
-        card.pack(side="top", fill="both", expand=True, padx=26, pady=(0, 12))
-        card.pack_propagate(False)
+        self.log_frame.pack_forget()
         self.log_text.tag_configure("error", foreground=DANGER)
         self.log_text.tag_configure("success", foreground=SUCCESS)
+        self.log_text.tag_configure("warning", foreground="#916400")
+        self.log_text.tag_configure("training", foreground="#2857A4")
+        self.log_text.tag_configure("validation", foreground="#28704A")
         self.log_visible = True
         self.setup_page = tk.Frame(self.content, bg=SURFACE)
         self.pages["system"] = self.setup_page
@@ -265,14 +329,95 @@ class Studio:
             key = "system"
         self.pages[key].pack(fill="both", expand=True)
         self.active = key
+        self._apply_workspace_layout()
         name, detail = PAGE_TEXT[key]
-        self.title.configure(text=name)
-        self.subtitle.configure(text=detail)
+        self.title.configure(text="Training monitor" if self._monitoring() else name)
+        self.subtitle.configure(text=("Live batch progress, epoch metrics and job output. "
+                                      "Training settings are available on demand."
+                                      if self._monitoring() else detail))
         for k, btn in self.nav.items():
             btn.configure(bg="#304C87" if k == key else NAV_BG,
                           fg="white" if k == key else "#CBD6E5")
         self.log_label.configure(text="· " + name)
         self._render_log()
+
+    def _monitoring(self):
+        """Only the datasets page becomes a full-screen live job monitor."""
+        return self.active == "train" and self.train_job is not None
+
+    def toggle_training_settings(self):
+        if not self._monitoring():
+            return
+        self.settings_expanded = not self.settings_expanded
+        self._apply_workspace_layout()
+
+    def _apply_workspace_layout(self):
+        """Reallocate space for setup, live monitoring and results.
+
+        Repacking does not recreate widgets or modify form values, and is safe
+        while the subprocess is still reporting batch progress.
+        """
+        monitoring = self._monitoring()
+        self.page_card.pack_forget()
+        self.log_frame.pack_forget()
+        self.monitor_tools.pack_forget()
+        self.metric_frame.pack_forget()
+        self.graph_frame.pack_forget()
+        self.log_text_frame.pack_forget()
+
+        if self.active == "results":
+            self.page_card.pack(fill="both", expand=True, padx=26, pady=(0, 18))
+            self.page_card.pack_propagate(True)
+            return
+
+        if monitoring:
+            if self.settings_expanded:
+                # A genuinely useful settings view, not a few clipped rows:
+                # give the form the available height and keep progress + stop
+                # controls in a compact dock beneath it.
+                self.log_frame.pack(side="bottom", fill="x", padx=26, pady=(0, 18))
+                self.page_card.pack(side="top", fill="both", expand=True,
+                                    padx=26, pady=(0, 8))
+                self.page_card.pack_propagate(False)
+            else:
+                self.log_frame.pack(side="top", fill="both", expand=True,
+                                    padx=26, pady=(0, 18))
+            self.monitor_label.configure(text=self.train_state.get())
+            self.settings_toggle.configure(text="Hide settings" if self.settings_expanded
+                                           else "Show settings")
+            self.monitor_tools.pack(side="top", fill="x", padx=15, pady=(0, 5))
+            expand_metrics = self.graph_visible and not self.settings_expanded
+            self.metric_frame.pack(side="top", fill="both" if expand_metrics else "x",
+                                   expand=expand_metrics,
+                                   padx=16, pady=(0, 6))
+            self.training_graph.pack_configure(fill="both", expand=True)
+            self.log_text.configure(height=2 if self.settings_expanded else 3)
+        else:
+            # Form-first layout: activity is a small, optional status dock.
+            # Pack the dock first, at the bottom, to guarantee form visibility.
+            self.log_frame.pack(side="bottom", fill="x", padx=26, pady=(0, 18))
+            self.page_card.pack(side="top", fill="both", expand=True,
+                                padx=26, pady=(0, 12))
+            self.page_card.pack_propagate(False)
+            self.log_text.configure(height=2 if self.active == "train" else 5)
+            if self.active == "train" and self.graph_visible:
+                self.metric_frame.pack(side="top", fill="x", padx=16, pady=(0, 6))
+                self.training_graph.pack_configure(fill="x", expand=False)
+
+        if self.active == "train" and self.graph_visible and not (
+                monitoring and self.settings_expanded):
+            self.metric_summary.pack_forget()
+            self.graph_frame.pack(fill="both" if monitoring else "x",
+                                  expand=monitoring, pady=(2, 5))
+        elif self.active == "train" and monitoring:
+            self.metric_summary.pack(fill="x", before=self.progress_head)
+
+        if self.log_visible:
+            expand_log = monitoring and not self.graph_visible and not self.settings_expanded
+            self.log_text_frame.pack(side="bottom" if monitoring else "top",
+                                     fill="both" if expand_log else "x",
+                                     expand=expand_log, padx=15,
+                                     pady=(0, 10 if monitoring else 13))
 
     def show(self, key):
         if key not in self.pages:
@@ -286,6 +431,14 @@ class Studio:
         if key not in self.logs:
             key = "system"
         parts = str(line).splitlines() or [""]
+        if key == "train":
+            from training_log import readable_line
+            parts = [readable_line(part) for part in parts]
+            for part in parts:
+                if part.startswith("Training |"):
+                    self.train_metrics.set(part)
+                elif part.startswith("Validation |"):
+                    self.val_metrics.set(part)
         for part in parts:
             self.logs[key].append(part[:1400])
         if key in self.activity_paths:
@@ -302,12 +455,17 @@ class Studio:
     def _append_visible(self, lines):
         self.log_text.configure(state="normal")
         for line in lines:
-            tag = "error" if ("ERROR" in line.upper() or "TRACEBACK" in line.upper()) else (
+            tag = "error" if ("ERROR" in line.upper() or "TRACEBACK" in line.upper() or "JOB FAILED" in line.upper()) else (
                 "success" if ("COMPLETE" in line.upper() or "FINISHED" in line.upper()) else "")
+            if not tag:
+                if "WARNING" in line.upper(): tag="warning"
+                elif line.startswith("Training |"): tag="training"
+                elif line.startswith("Validation |"): tag="validation"
             self.log_text.insert("end", line[:1400] + "\n", tag)
         if int(self.log_text.index("end-1c").split(".")[0]) > 1100:
             self.log_text.delete("1.0", "130.0")
-        self.log_text.see("end")
+        if self.follow_log.get():
+            self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
     def _render_log(self):
@@ -320,12 +478,23 @@ class Studio:
         self.logs[self.active].clear()
         self._render_log()
 
+    def set_graph_visibility(self, visible):
+        self.graph_visible = visible
+        if visible:
+            self.metric_summary.pack_forget()
+            self.log_visible = False
+        else:
+            self.log_visible = True
+        self._apply_workspace_layout()
+        self.log_toggle.configure(text="Hide log" if self.log_visible else "Show log")
+        self.graph_toggle.configure(text="Hide graphs" if visible else "Show graphs")
+
+    def toggle_graph(self):
+        self.set_graph_visibility(not self.graph_visible)
+
     def toggle_log(self):
         self.log_visible = not self.log_visible
-        if self.log_visible:
-            self.log_text_frame.pack(fill="x", padx=15, pady=(0, 13))
-        else:
-            self.log_text_frame.pack_forget()
+        self._apply_workspace_layout()
         self.log_toggle.configure(text="Hide log" if self.log_visible else "Show log")
 
     def report(self, kind, value):
@@ -386,6 +555,8 @@ class Studio:
         if not _same_executable(sys.executable, str(python)):
             args = [str(python), "-u", str(APP_DIR / "greenplast_launcher.py"),
                     "--env-prefix", str(self.env), "--conda-exe", str(self.conda)]
+            if self.allow_multiple:
+                args.append("--new-instance")
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             try:
                 subprocess.Popen(args, cwd=str(APP_DIR), env=process_environment(self.env),
@@ -395,6 +566,11 @@ class Studio:
                 self.env_status.set("Could not open managed application")
                 self._show("system")
                 return
+            self.root.destroy()
+            return
+        # Also protect direct launches from a managed Python without CLI flags.
+        if not self.allow_multiple and not claim_gui_instance():
+            activate_existing_window()
             self.root.destroy()
             return
         self._init_pages()
@@ -463,7 +639,8 @@ class Studio:
             train = tk.Frame(self.content, bg=SURFACE)
             audit = tk.Frame(self.content, bg=SURFACE)
             recall = tk.Frame(self.content, bg=SURFACE)
-            self.pages.update(train=train, audit=audit, recall=recall)
+            results = tk.Frame(self.content, bg=SURFACE)
+            self.pages.update(train=train, audit=audit, recall=recall, results=results)
             train_controls = ttk.Frame(train, padding=(20, 12, 20, 0))
             train_controls.pack(fill="x")
             self.train_state = tk.StringVar(value="Ready · split datasets or train existing YOLO splits")
@@ -482,6 +659,9 @@ class Studio:
             self.recall_gui = RecallTestGUI(self._scroll_host(recall), embedded=True,
                                             on_log=lambda message: self.log_line("recall", message))
             self.recall_gui.run_button.configure(style="Accent.TButton")
+            self.results_panel = TrainingResultsPanel(results, APP_DIR / "logs",
+                on_log=lambda line: self.log_line("results", line))
+            self.results_panel.pack(fill="both", expand=True)
         except Exception as exc:
             import traceback
             self.log_line("system", "ERROR loading tool panels:\n" + traceback.format_exc())
@@ -493,6 +673,7 @@ class Studio:
         self.log_line("train", "Ready. Split, train an existing dataset, or pre-annotate images.")
         self.log_line("audit", "Ready. The audit reads annotations without modifying them.")
         self.log_line("recall", "Ready. Cached predictions can be reused for new precision thresholds.")
+        self.log_line("results", "Select a recent training run or browse to an Ultralytics run folder.")
 
     def start_training(self, settings):
         self._start_job(settings, "train")
@@ -528,14 +709,30 @@ class Studio:
         except OSError as exc:
             messagebox.showerror("Could not start training", str(exc), parent=self.root)
             return
+        self.train_metrics.set("Training: waiting for epoch results")
+        self.val_metrics.set("Validation: waiting for evaluation")
+        self.iteration_bar.configure(value=0)
+        self.training_graph.reset()
+        self.set_graph_visibility(kind == "train" and (
+            bool(submitted.get("existing_data_yaml")) or
+            bool(submitted.get("train_after_split", True))))
+        self.iteration_label.set("Waiting for training batches" if kind == "train"
+                                 else "Pre-annotation running")
         self.train_job = {"process": proc, "log": logfile, "offset": 0,
-                          "pending": "", "stopping": False, "cache_manifest": cache_manifest}
+                          "pending": "", "stopping": False, "cache_manifest": cache_manifest,
+                          "kind": kind, "settings": submitted, "run_dir": None}
+        self.settings_expanded = False
+        # With the form collapsed there is room for both curves and job text.
+        self.log_visible = True
+        self.log_toggle.configure(text="Hide log")
         self.train_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.train_state.set("Running " + (
             "pre-annotation" if kind == "preannotate" else
             "existing dataset training" if settings.get("existing_data_yaml") else
             "split + training" if settings["train_after_split"] else "split only"))
+        if self.active == "train":
+            self._show("train")
         self.log_line("train", "Started job " + str(proc.pid) + " · " + str(logfile))
         self.log_line("train", "Settings saved to " + str(config))
 
@@ -557,8 +754,32 @@ class Studio:
         except (OSError, subprocess.TimeoutExpired, ProcessLookupError) as exc:
             self.log_line("train", "Stop request error: " + str(exc))
         self.train_state.set("Stopping job…")
+        self.monitor_label.configure(text=self.train_state.get())
         self.stop_button.configure(state="disabled")
         self.log_line("train", "Stop requested. Output files remain untouched.")
+
+    def _training_output_line(self, line):
+        from training_log import parse_epoch_metrics, parse_iteration_progress, parse_training_run_dir
+        completed_run = parse_training_run_dir(line)
+        if completed_run is not None:
+            if self.train_job is not None:
+                self.train_job["run_dir"] = completed_run
+            return
+        metrics = parse_epoch_metrics(line)
+        if metrics is not None:
+            self.training_graph.record(metrics)
+            return  # Keep structured graph events in job file, not the activity text.
+        progress = parse_iteration_progress(line)
+        if progress is not None:
+            epoch, epochs, iteration, iterations = progress
+            percent = 100 * iteration / iterations
+            self.iteration_bar.configure(value=percent)
+            suffix = " · validating / saving" if iteration == iterations else ""
+            self.iteration_label.set(
+                f"Epoch {epoch}/{epochs}  ·  {iteration}/{iterations} batches  ·  "
+                f"{percent:.0f}%{suffix}")
+        else:
+            self.log_line("train", line)
 
     def _poll_training(self):
         job = self.train_job
@@ -573,9 +794,9 @@ class Studio:
             if chunk:
                 lines = (job["pending"] + chunk).replace("\r", "\n").split("\n")
                 job["pending"] = lines.pop()
-                for line in lines[-110:]:
+                for line in lines:
                     if line.strip():
-                        self.log_line("train", line)
+                        self._training_output_line(line)
             returncode = proc.poll()
             if returncode is not None and job["log"].stat().st_size <= job["offset"]:
                 manifest = job.get("cache_manifest")
@@ -590,7 +811,7 @@ class Studio:
                     except (OSError, ValueError, KeyError) as exc:
                         self.log_line("train", f"WARNING: cache cleanup could not complete: {exc}")
                 if job["pending"].strip():
-                    self.log_line("train", job["pending"])
+                    self._training_output_line(job["pending"])
                 if job["stopping"]:
                     label = "Job stopped"
                 elif returncode == 0:
@@ -602,6 +823,14 @@ class Studio:
                 self.train_button.configure(state="normal")
                 self.stop_button.configure(state="disabled")
                 self.train_job = None
+                self.settings_expanded = False
+                self.set_graph_visibility(False)
+                if not job["stopping"] and returncode == 0 and job.get("kind") == "train" and job.get("run_dir"):
+                    if self.results_panel.load_run(job["run_dir"]):
+                        self._show("results")
+                        return
+                if self.active == "train":
+                    self._show("train")
         except OSError as exc:
             self.log_line("train", "Log read error: " + str(exc))
 
@@ -691,25 +920,40 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Unified CV Waste Studio")
     parser.add_argument("--env-prefix", default=None)
     parser.add_argument("--conda-exe", default=None)
+    parser.add_argument("--new-instance", action="store_true",
+                        help="Open an additional Studio window rather than focusing the current one")
     args = parser.parse_args(argv)
-    prepared = None
-    if args.env_prefix or args.conda_exe:
-        if not args.env_prefix or not args.conda_exe:
-            parser.error("--env-prefix and --conda-exe must both be specified")
-        env = Path(args.env_prefix).resolve()
-        cached = cached_environment(expected_conda=args.conda_exe, expected_prefix=env)
-        if cached:
-            prepared = cached
-        else:
-            details = probe_env(args.conda_exe, env, needs_cuda=False, timeout=480)
-            if not details.get("ok"):
-                parser.error("Managed environment is not usable: " + str(details.get("error", details)))
-            prepared = (args.conda_exe, env, details)
-            try:
-                save_cached_environment(*prepared)
-            except OSError:
-                pass
-    Studio(prepared).run()
+    if args.env_prefix and not args.conda_exe or args.conda_exe and not args.env_prefix:
+        parser.error("--env-prefix and --conda-exe must both be specified")
+    # Explicit new-window launches bypass the Windows mutex, including across
+    # the base-Conda-to-managed-Python handoff. Normal launches still focus.
+    allow_multiple = (args.new_instance or
+                      os.environ.get("CV_WASTE_STUDIO_NEW_INSTANCE") == "1")
+    if not allow_multiple and another_instance_running():
+        activate_existing_window()
+        return
+    try:
+        prepared = None
+        if args.env_prefix:
+            if not allow_multiple and not claim_gui_instance():
+                activate_existing_window()
+                return
+            env = Path(args.env_prefix).resolve()
+            cached = cached_environment(expected_conda=args.conda_exe, expected_prefix=env)
+            if cached:
+                prepared = cached
+            else:
+                details = probe_env(args.conda_exe, env, needs_cuda=False, timeout=480)
+                if not details.get("ok"):
+                    parser.error("Managed environment is not usable: " + str(details.get("error", details)))
+                prepared = (args.conda_exe, env, details)
+                try:
+                    save_cached_environment(*prepared)
+                except OSError:
+                    pass
+        Studio(prepared, allow_multiple=allow_multiple).run()
+    finally:
+        release_gui_instance()
 
 
 if __name__ == "__main__":

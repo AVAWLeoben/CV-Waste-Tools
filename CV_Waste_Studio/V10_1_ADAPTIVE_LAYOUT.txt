@@ -1,0 +1,32 @@
+CV Waste Studio v10.1 — Adaptive Datasets & Training Layout
+========================================================
+
+Before starting a dataset job (SETUP MODE):
+  - The configuration form uses nearly the full workspace.
+  - The shared activity log is a compact 2-line dock.
+  - The form, workflow tabs, and Start button retain their original functionality.
+
+After starting a training, split-only, or pre-annotation job (MONITOR MODE):
+  - The configuration form is hidden automatically.
+  - The activity area expands to occupy the full workspace.
+  - Live batch progress, Ultralytics epoch charts, and recent log lines remain visible.
+  - The active job status and Stop running job button remain accessible.
+  - Show settings restores a fully scrollable configuration form while keeping
+    the progress indicator, status, log, and Stop button visible in a short dock.
+  - Hide settings returns to the live monitor.
+  - Show log / Hide log and Show graphs / Hide graphs continue to work.
+  - With the graphs hidden, the text log expands to use available room.
+
+When the job ends:
+  - The form-first setup layout and compact log return.
+  - Successful training still opens the Training Results page when available.
+  - Switching to the Training Results page still uses the full workspace.
+
+No changes to Ultralytics training, the dataloader, model parameters, disk cache,
+annotation/audit functions, environment setup, or launchers.
+
+Verification:
+  - 58 automated tests passed under Xvfb (18 additional subtests).
+  - Tkinter setup/monitor/settings-toggle/completion/results navigation checked.
+  - Py_compile passed for the launcher and training-related modules.
+  - Native Windows desktop display and GPU training not exercised here.

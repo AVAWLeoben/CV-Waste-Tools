@@ -1,0 +1,23 @@
+CV Waste Studio v9.1 — Startup and duplicate-launch fix
+==================================================
+
+What changed
+------------
+- Windows now limits the GUI to one instance per application installation.
+  Opening the shortcut again attempts to restore/focus the existing window.
+- Every VBS launch writes its own startup log:
+    <same folder as START_CV_WASTE_TOOLS.vbs>\logs\windows_startup_YYYYMMDD_HHMMSS_NNNNNN.log
+- The familiar logs\windows_startup.log is also retained as a best-effort
+  copy of the latest launch log.
+- An unsuccessful launch shows the FULL path to the per-launch diagnostic log.
+
+Notes
+-----
+- Close any older version of CV Waste Studio before installing v9.1. The
+  already-running v9 app cannot participate in the new single-instance guard.
+- If you have multiple extracted copies, Windows shortcuts may still point at
+  an older copy. Check right-click Shortcut > Properties > Target.
+- This update doesn't alter training, audit, annotation, inference, model files,
+  the environment setup, or training log processing.
+- This guard is for Windows GUI sessions; Linux launch behaviour is unchanged.
+- The Windows-specific handling could not be run on Windows in this environment.
