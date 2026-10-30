@@ -1897,6 +1897,10 @@ def _train_with_compact_progress(model, train_args, compact_progress=True):
     def epoch_summary(trainer):
         from training_log import epoch_metrics_from_trainer, format_epoch_metrics, loss_summary
         event = epoch_metrics_from_trainer(trainer)
+        # Ultralytics also calls this hook once for final best-model evaluation;
+        # that is not an additional training epoch.
+        if event["epoch"] > event["epochs"]:
+            return
         # Always send epoch metrics to the live graph, even in non-compact mode.
         print(format_epoch_metrics(event), flush=True)
         if compact_progress:

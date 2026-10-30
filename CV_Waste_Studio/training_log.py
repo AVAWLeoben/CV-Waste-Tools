@@ -96,7 +96,18 @@ def epoch_metrics_from_trainer(trainer):
                         result[key] = number
                 except (ValueError, TypeError, OverflowError):
                     continue
-    return {"epoch": epoch, "epochs": total, "metrics": result}
+    event = {"epoch": epoch, "epochs": total, "metrics": result}
+    # Match the fitness used by Ultralytics to choose best.pt, rather than
+    # assuming that the lowest training loss selects the checkpoint.
+    try:
+        fitness = float(getattr(trainer, "fitness", None))
+        best_fitness = float(getattr(trainer, "best_fitness", None))
+        if math.isfinite(fitness) and math.isfinite(best_fitness):
+            event["fitness"] = fitness
+            event["checkpoint_best"] = fitness == best_fitness
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return event
 
 
 def format_epoch_metrics(event):
@@ -122,7 +133,16 @@ def parse_epoch_metrics(line):
             if not math.isfinite(number):
                 return None
             checked[key] = number
-        return {"epoch": epoch, "epochs": epochs, "metrics": checked}
+        parsed = {"epoch": epoch, "epochs": epochs, "metrics": checked}
+        if "fitness" in event or "checkpoint_best" in event:
+            fitness = event.get("fitness")
+            is_best = event.get("checkpoint_best")
+            if (type(fitness) not in (int, float) or not math.isfinite(fitness)
+                    or type(is_best) is not bool):
+                return None
+            parsed["fitness"] = float(fitness)
+            parsed["checkpoint_best"] = is_best
+        return parsed
     except (ValueError, TypeError, KeyError, OverflowError):
         return None
 
@@ -169,3 +189,68 @@ def parse_training_run_dir(line):
         return path if isinstance(path, str) and path.strip() else None
     except (ValueError, TypeError):
         return None
+
+
+class BestEpochTracker:
+    """Track the current best checkpoint with its *own epoch's* validation metrics.
+
+    Native on_fit_epoch_end events indicate if Ultralytics selected the epoch
+    for best.pt. Older structured events fall back to detection mAP50-95.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.best = None
+        self.score = None
+        self.criterion = None
+
+    def record(self, event):
+        if not 1 <= event["epoch"] <= event["epochs"]:
+            return False
+        metrics = event["metrics"]
+        native = "checkpoint_best" in event
+        if native:
+            if not event["checkpoint_best"]:
+                return False
+            score = event["fitness"]
+            criterion = "Ultralytics fitness (best.pt)"
+        else:
+            # Backward-compatible fallback for logs lacking native fitness.
+            key = "metrics/mAP50-95(B)"
+            if key not in metrics:
+                return False
+            score = metrics[key]
+            criterion = "peak validation mAP50–95"
+            if self.best is not None and self.criterion == criterion and score < self.score:
+                return False
+        if self.best is not None and self.best["epoch"] == event["epoch"] and self.best == event:
+            return False
+        self.best = event
+        self.score = score
+        self.criterion = criterion
+        return True
+
+    def display(self):
+        if self.best is None:
+            return ("BEST EPOCH SO FAR  ·  Waiting for validation",
+                    "Ultralytics best.pt is selected using validation fitness.", "")
+        event, m = self.best, self.best["metrics"]
+        heading = (f"BEST EPOCH SO FAR  ·  {event['epoch']}/{event['epochs']}  ·  "
+                   f"{self.criterion}: {self.score:.4f}")
+        key_pairs = (("metrics/precision(B)", "Precision"),
+                     ("metrics/recall(B)", "Recall"),
+                     ("metrics/mAP50(B)", "mAP50"),
+                     ("metrics/mAP50-95(B)", "mAP50–95"))
+        validation = "     ·     ".join(f"{label} {m[key] * 100:.1f}%"
+                                     for key, label in key_pairs if key in m)
+        loss_pairs = (("train/box_loss", "Train box"),
+                      ("train/cls_loss", "Train cls"),
+                      ("train/dfl_loss", "Train DFL"),
+                      ("val/box_loss", "Val box"),
+                      ("val/cls_loss", "Val cls"),
+                      ("val/dfl_loss", "Val DFL"))
+        losses = "     ·     ".join(f"{label} {m[key]:.3f}"
+                                 for key, label in loss_pairs if key in m)
+        return heading, validation or "Validation metrics pending", losses

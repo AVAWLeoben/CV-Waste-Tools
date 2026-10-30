@@ -1,0 +1,37 @@
+CV WASTE STUDIO v10.4 — BEST EPOCH DURING TRAINING
+==================================================
+
+This release is based on v10.3 and retains the Recall@Precision controls,
+training results dashboard, adaptive workspace, and all previous functions.
+
+Training Monitor:
+- Adds a compact "BEST EPOCH SO FAR" panel above the iteration progress bar.
+- Uses the current Ultralytics trainer's native fitness/best_fitness values
+  to identify the epoch selected for the best.pt checkpoint.
+- Displays the selected epoch number, native fitness, precision, recall,
+  mAP50, mAP50-95, and available training and validation losses.
+- Updates only when Ultralytics selects a new best epoch; the summary remains
+  visible while later epochs run.
+- A short "Best epoch updated" message also appears in the activity log.
+- Before the first validation, displays a waiting message.
+- The selected best resets at the start of every new training job.
+
+The live charts still plot every epoch. Batch progress and existing backend
+training arguments remain unchanged. Results.csv, best.pt and last.pt are
+still written exclusively by Ultralytics.
+
+Legacy structured training metrics without native fitness are supported via
+peak validation mAP50-95, explicitly labelled as a fallback.
+
+The extra final best-model validation callback (after all epochs) is ignored
+for live epoch events, avoiding a phantom epoch beyond the training limit.
+
+Only these application files changed:
+- training_log.py
+- greenplast_launcher.py
+- train_and_split_tool_GUI.py (final evaluation callback guard)
+- tests/test_best_epoch_monitor.py (new)
+
+Verification: 64 automated tests passed under Xvfb, all changed .py files
+compiled successfully, GUI checked at 1290x845. Full RTX/GPU training is
+not available in this environment and must be checked on the target PC.

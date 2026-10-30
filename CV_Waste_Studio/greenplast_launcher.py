@@ -23,6 +23,7 @@ from tkinter import messagebox, ttk
 
 from studio_branding import apply_window_icon, set_windows_app_id, sidebar_icon
 from training_charts import LiveMetricsGraph
+from training_log import BestEpochTracker
 from training_results import TrainingResultsPanel
 from studio_single_instance import (another_instance_running, claim_gui_instance,
                                     release_gui_instance, activate_existing_window)
@@ -85,6 +86,7 @@ class Studio:
         self.activity_paths = {key: APP_DIR / "logs" / f"studio_{key}_{self.session_stamp}.log"
                                for key in ("system", "audit", "recall")}
         self.train_job = None
+        self.best_epoch_tracker = BestEpochTracker()
         self.train_button = None
         self.settings_expanded = False
         self.audit_gui = None
@@ -241,6 +243,22 @@ class Studio:
                  anchor="w", justify="left", wraplength=820, font=("Segoe UI",9)).pack(fill="x")
         tk.Label(self.metric_summary, textvariable=self.val_metrics, bg=SURFACE, fg="#28704A",
                  anchor="w", justify="left", wraplength=820, font=("Segoe UI",9)).pack(fill="x")
+        # The best checkpoint remains visible even when the latest-epoch
+        # summary is hidden in graph-first monitoring mode.
+        self.best_epoch_banner = tk.Frame(self.metric_frame, bg="#F0F5FF",
+                                          highlightbackground="#B7CAF5",
+                                          highlightthickness=1)
+        self.best_epoch_banner.pack(fill="x", pady=(0, 5))
+        self.best_heading = tk.StringVar()
+        self.best_scores = tk.StringVar()
+        self.best_losses = tk.StringVar()
+        for variable, color, font in (
+                (self.best_heading, "#204B9B", ("Segoe UI", 9, "bold")),
+                (self.best_scores, INK, ("Segoe UI", 9)),
+                (self.best_losses, MUTED, ("Segoe UI", 8))):
+            tk.Label(self.best_epoch_banner, textvariable=variable, bg="#F0F5FF",
+                     fg=color, font=font, anchor="w").pack(fill="x", padx=11, pady=1)
+        self._refresh_best_epoch()
         self.progress_head = tk.Frame(self.metric_frame, bg=SURFACE)
         self.progress_head.pack(fill="x", pady=(7, 3))
         tk.Label(self.progress_head, text="ITERATION PROGRESS", bg=SURFACE, fg=MUTED,
@@ -710,6 +728,8 @@ class Studio:
         except OSError as exc:
             messagebox.showerror("Could not start training", str(exc), parent=self.root)
             return
+        self.best_epoch_tracker.reset()
+        self._refresh_best_epoch()
         self.train_metrics.set("Training: waiting for epoch results")
         self.val_metrics.set("Validation: waiting for evaluation")
         self.iteration_bar.configure(value=0)
@@ -759,6 +779,12 @@ class Studio:
         self.stop_button.configure(state="disabled")
         self.log_line("train", "Stop requested. Output files remain untouched.")
 
+    def _refresh_best_epoch(self):
+        heading, scores, losses = self.best_epoch_tracker.display()
+        self.best_heading.set(heading)
+        self.best_scores.set(scores)
+        self.best_losses.set(losses)
+
     def _training_output_line(self, line):
         from training_log import parse_epoch_metrics, parse_iteration_progress, parse_training_run_dir
         completed_run = parse_training_run_dir(line)
@@ -769,6 +795,10 @@ class Studio:
         metrics = parse_epoch_metrics(line)
         if metrics is not None:
             self.training_graph.record(metrics)
+            tracker = getattr(self, "best_epoch_tracker", None)
+            if tracker is not None and tracker.record(metrics):
+                self._refresh_best_epoch()
+                self.log_line("train", "Best epoch updated: " + tracker.display()[0])
             return  # Keep structured graph events in job file, not the activity text.
         progress = parse_iteration_progress(line)
         if progress is not None:
