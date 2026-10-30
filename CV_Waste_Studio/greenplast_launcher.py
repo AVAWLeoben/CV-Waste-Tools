@@ -659,6 +659,7 @@ class Studio:
             self.recall_gui = RecallTestGUI(self._scroll_host(recall), embedded=True,
                                             on_log=lambda message: self.log_line("recall", message))
             self.recall_gui.run_button.configure(style="Accent.TButton")
+            self.recall_gui.stop_button.configure(style="Danger.TButton")
             self.results_panel = TrainingResultsPanel(results, APP_DIR / "logs",
                 on_log=lambda line: self.log_line("results", line))
             self.results_panel.pack(fill="both", expand=True)
@@ -897,16 +898,19 @@ class Studio:
                 parent=self.root):
             return
         if active_audit:
-            # The audit uses cooperative cancellation; allow its worker to
-            # stop before closing so that no partial replacement CSV is saved.
             self.audit_gui.cancel()
-            self._wait_for_audit_shutdown()
+        if active_recall:
+            self.recall_gui.cancel()
+        if active_audit or active_recall:
+            # Let cooperative cancellation complete before closing the GUI.
+            self._wait_for_evaluations_shutdown()
         else:
             self.root.destroy()
 
-    def _wait_for_audit_shutdown(self):
-        if self.audit_gui and self.audit_gui.busy:
-            self.root.after(250, self._wait_for_audit_shutdown)
+    def _wait_for_evaluations_shutdown(self):
+        if ((self.audit_gui and self.audit_gui.busy) or
+                (self.recall_gui and self.recall_gui.busy)):
+            self.root.after(250, self._wait_for_evaluations_shutdown)
         else:
             self.root.destroy()
 

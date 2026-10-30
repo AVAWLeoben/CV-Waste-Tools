@@ -103,6 +103,8 @@ LAYOUT & CONTROLS
   and run Recheck / repair. Environment repair is blocked during active jobs.
 - Activity dock: automatic per-workspace logs; Hide log to give settings more
   space, and scroll inside each long settings page where necessary.
+- Recall@Precision evaluation has a Stop evaluation button; it stops at the next
+  safe inference/analysis checkpoint without deleting completed prediction caches.
 - Model operations keep running if you switch workspaces.
 - Closing the app during training offers to leave the headless training
   process running, with its saved output log.
@@ -181,3 +183,8 @@ no YAML, add a standard Ultralytics data.yaml first.
 
 ICON TROUBLESHOOTING (V5): See ICON_AND_SHORTCUTS.txt. Unpin old Windows
 taskbar icons before recreating shortcuts with the supplied VBS installer.
+
+Recall@Precision (v10.3): select Class-agnostic NMS to pass agnostic_nms=True to
+Ultralytics prediction. Enabling it requires a separate prediction cache.
+After a successful evaluation, click Open Results Folder to open the exact
+saved precision_recall_* results directory in the system file manager.

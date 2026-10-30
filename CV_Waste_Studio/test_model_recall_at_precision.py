@@ -19,6 +19,7 @@ from pathlib import Path
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import threading
@@ -31,6 +32,15 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 CONF_FLOOR = 0.01
 CACHE_VERSION = 2
+
+
+class EvaluationCancelled(Exception):
+    """Raised when the user requests a safe stop of Recall@Precision."""
+
+
+def _check_cancelled(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise EvaluationCancelled("Recall@Precision evaluation stopped by user.")
 
 
 def parse_target_precision(text: str) -> float:
@@ -185,18 +195,20 @@ def _parse_yolo_label(path: Path):
     return np.asarray(output, dtype=np.float32).reshape(-1, 5)
 
 
-def ground_truth(images: list[Path], emit):
+def ground_truth(images: list[Path], emit, cancel_event=None):
     """Read labels afresh every run; editing labels does not invalidate predictions."""
     labels = []
     missing = 0
     targets = 0
     for image in images:
+        _check_cancelled(cancel_event)
         label = image_to_label(image)
         if not label.is_file():
             missing += 1
         boxes = _parse_yolo_label(label)
         labels.append(boxes)
         targets += len(boxes)
+    _check_cancelled(cancel_event)
     emit("log", f"Ground truth: {targets} boxes in {len(images)} images; "
                 f"{missing} images without label files (treated as background).")
     if targets == 0:
@@ -208,11 +220,14 @@ def _cache_identity(settings: dict, images: list[Path]) -> str:
     """Identity of model, prediction settings, and ordered image files only."""
     model = Path(settings["model"]).resolve()
     h = hashlib.sha256()
-    h.update(json.dumps({"cache_version": CACHE_VERSION, "model": _normal_path(model),
-                         "model_size": model.stat().st_size, "model_mtime_ns": model.stat().st_mtime_ns,
-                         "imgsz": settings["imgsz"], "conf": CONF_FLOOR,
-                         "nms_iou": settings["nms_iou"],
-                         "max_det": settings["max_det"]}, sort_keys=True).encode("utf-8"))
+    identity = {"cache_version": CACHE_VERSION, "model": _normal_path(model),
+                "model_size": model.stat().st_size, "model_mtime_ns": model.stat().st_mtime_ns,
+                "imgsz": settings["imgsz"], "conf": CONF_FLOOR,
+                "nms_iou": settings["nms_iou"], "max_det": settings["max_det"]}
+    # Retain the old cache key when disabled, so previous inference caches still work.
+    if settings.get("agnostic_nms", False):
+        identity["agnostic_nms"] = True
+    h.update(json.dumps(identity, sort_keys=True).encode("utf-8"))
     for image in images:
         stat = image.stat()
         h.update(_normal_path(image).encode("utf-8"))
@@ -282,10 +297,11 @@ def _names_dict(names):
 
 
 def predict_and_cache(settings: dict, images: list[Path], cache_path: Path,
-                      meta_path: Path, emit):
+                      meta_path: Path, emit, cancel_event=None):
     """One *streaming/batched* predictor invocation for all images."""
     import numpy as np
     from ultralytics import YOLO
+    _check_cancelled(cancel_event)
     inference_started = time.perf_counter()
     device = choose_device(settings["device"], emit)
     emit("status", "Loading model and running batched inference ...")
@@ -300,28 +316,38 @@ def predict_and_cache(settings: dict, images: list[Path], cache_path: Path,
         manifest.write_text("\n".join(str(p) for p in images) + "\n", encoding="utf-8")
         emit("log", f"Predicting {len(images)} images in batches of {settings['batch']} "
                     f"| imgsz={settings['imgsz']} | conf={CONF_FLOOR} "
-                    f"| NMS IoU={settings['nms_iou']} | device={device}")
+                    f"| NMS IoU={settings['nms_iou']} "
+                    f"| agnostic_nms={settings.get('agnostic_nms', False)} | device={device}")
         stream = model.predict(source=str(manifest), conf=CONF_FLOOR,
                                imgsz=settings["imgsz"], batch=settings["batch"],
                                iou=settings["nms_iou"], max_det=settings["max_det"],
+                               agnostic_nms=settings.get("agnostic_nms", False),
                                device=device, stream=True, save=False, verbose=False)
-        for count, result in enumerate(stream, 1):
-            key = _normal_path(result.path)
-            if key not in index_of:
-                raise RuntimeError(f"Unexpected result path from Ultralytics: {result.path}")
-            idx = index_of[key]
-            if idx in visited:
-                raise RuntimeError(f"Duplicate inference result: {result.path}")
-            visited.add(idx)
-            if result.boxes is not None and len(result.boxes):
-                xyxy = result.boxes.xyxyn.cpu().numpy().astype(np.float32)
-                conf = result.boxes.conf.cpu().numpy().astype(np.float32)
-                cls = result.boxes.cls.cpu().numpy().astype(np.int32)
-                counts[idx] = len(conf)
-                chunks.append((np.full(len(conf), idx, np.int32), cls, conf, xyxy))
-            if count % 100 == 0 or count == len(images):
-                emit("status", f"GPU/CPU inference: {count}/{len(images)} images")
-                emit("log", f"Processed {count}/{len(images)} images")
+        try:
+            for count, result in enumerate(stream, 1):
+                _check_cancelled(cancel_event)
+                key = _normal_path(result.path)
+                if key not in index_of:
+                    raise RuntimeError(f"Unexpected result path from Ultralytics: {result.path}")
+                idx = index_of[key]
+                if idx in visited:
+                    raise RuntimeError(f"Duplicate inference result: {result.path}")
+                visited.add(idx)
+                if result.boxes is not None and len(result.boxes):
+                    xyxy = result.boxes.xyxyn.cpu().numpy().astype(np.float32)
+                    conf = result.boxes.conf.cpu().numpy().astype(np.float32)
+                    cls = result.boxes.cls.cpu().numpy().astype(np.int32)
+                    counts[idx] = len(conf)
+                    chunks.append((np.full(len(conf), idx, np.int32), cls, conf, xyxy))
+                if count % 100 == 0 or count == len(images):
+                    emit("status", f"GPU/CPU inference: {count}/{len(images)} images")
+                    emit("log", f"Processed {count}/{len(images)} images")
+        finally:
+            # Stop consuming results and release the streaming predictor cleanly.
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+    _check_cancelled(cancel_event)
     if len(visited) != len(images):
         raise RuntimeError(f"Incomplete inference: {len(visited)}/{len(images)} images returned. "
                            "No partial cache was saved.")
@@ -342,6 +368,7 @@ def predict_and_cache(settings: dict, images: list[Path], cache_path: Path,
         with tmp_npz.open("wb") as file:
             np.savez_compressed(file, image_index=image_index, classes=classes,
                                 confidence=confidence, xyxy=xyxy)
+        _check_cancelled(cancel_event)
         os.replace(tmp_npz, cache_path)
     finally:
         tmp_npz.unlink(missing_ok=True)
@@ -352,12 +379,14 @@ def predict_and_cache(settings: dict, images: list[Path], cache_path: Path,
         "device": device, "created": datetime.now().isoformat(timespec="seconds"),
         "conf_floor": CONF_FLOOR, "imgsz": settings["imgsz"],
         "batch": settings["batch"], "nms_iou": settings["nms_iou"],
+        "agnostic_nms": settings.get("agnostic_nms", False),
         "max_det": settings["max_det"],
         "inference_seconds": round(time.perf_counter() - inference_started, 3),
     }
     tmp_json = meta_path.with_suffix(meta_path.suffix + ".tmp")
     try:
         tmp_json.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+        _check_cancelled(cancel_event)
         os.replace(tmp_json, meta_path)
     finally:
         tmp_json.unlink(missing_ok=True)
@@ -394,7 +423,7 @@ def box_iou(box: "np.ndarray", candidates: "np.ndarray"):
 
 
 def compute_curve(pred: dict, gt_by_image: list, food_class: int,
-                  target: float, match_iou: float):
+                  target: float, match_iou: float, cancel_event=None):
     """Exact greedy confidence-ranked class-aware IoU matching, run only on CPU.
 
     A Food detection is TP iff it matches an as-yet-unmatched Food GT with IoU
@@ -417,6 +446,7 @@ def compute_curve(pred: dict, gt_by_image: list, food_class: int,
         image_sorted = image_indices[ordered_images]
         boundaries = np.searchsorted(image_sorted, np.arange(len(gt_by_image) + 1))
         for idx, gt in enumerate(gt_by_image):
+            _check_cancelled(cancel_event)
             if boundaries[idx] == boundaries[idx + 1]:
                 continue
             local = ordered_images[boundaries[idx]:boundaries[idx + 1]]
@@ -426,6 +456,7 @@ def compute_curve(pred: dict, gt_by_image: list, food_class: int,
                 continue
             used = np.zeros(len(food_boxes), dtype=bool)
             for j in local:
+                _check_cancelled(cancel_event)
                 ious = box_iou(boxes[j], food_boxes)
                 ious[used] = -1
                 best = int(np.argmax(ious))
@@ -493,9 +524,10 @@ def _save_plots(output: Path, curve: dict):
     plt.close(fig)
 
 
-def evaluate(settings: dict, emit, *, cache_only: bool = False):
+def evaluate(settings: dict, emit, *, cache_only: bool = False, cancel_event=None):
     """Cache inference once, recompute PR from saved detections on every run."""
     analysis_started = time.perf_counter()
+    _check_cancelled(cancel_event)
     model_file = Path(settings["model"])
     if not model_file.is_file():
         raise ValueError(f"Model file does not exist: {model_file}")
@@ -503,6 +535,7 @@ def evaluate(settings: dict, emit, *, cache_only: bool = False):
     dest.mkdir(parents=True, exist_ok=True)
     emit("status", "Resolving images and cache ...")
     images = collect_images(settings)
+    _check_cancelled(cancel_event)
     emit("log", f"Found {len(images)} dataset images.")
     digest = _cache_identity(settings, images)
     cache_dir = dest / "prediction_cache"
@@ -515,32 +548,42 @@ def evaluate(settings: dict, emit, *, cache_only: bool = False):
     if cache_exists and (cache_only or settings.get("reuse_cache", True)):
         emit("status", "Loading cached detections (no model inference) ...")
         pred, meta = load_cached(cache_path, meta_path, len(images))
+        _check_cancelled(cancel_event)
         emit("log", f"CACHE HIT — {len(pred['confidence'])} detections, "
                     f"original device: {meta.get('device')}. No model or GPU initialization.")
         used_cache = True
     else:
         if cache_only:
             raise ValueError("Prediction cache unavailable.")
-        pred, meta = predict_and_cache(settings, images, cache_path, meta_path, emit)
+        pred, meta = predict_and_cache(settings, images, cache_path, meta_path, emit,
+                                       cancel_event=cancel_event)
         used_cache = False
     emit("status", "Matching detections to annotations and sweeping confidence ...")
-    gt = ground_truth(images, emit)
+    gt = ground_truth(images, emit, cancel_event=cancel_event)
     class_id = settings["food_class"]
     names = meta.get("class_names", {})
     if names and str(class_id) not in names:
         raise ValueError(f"Class {class_id} is not in model classes: {names}")
-    curve = compute_curve(pred, gt, class_id, settings["precision"], settings["match_iou"])
+    curve = compute_curve(pred, gt, class_id, settings["precision"], settings["match_iou"],
+                          cancel_event=cancel_event)
+    _check_cancelled(cancel_event)
     run_dir = dest / ("precision_recall_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
     run_dir.mkdir(parents=True)
     curve_path = run_dir / "food_precision_recall_by_confidence.csv"
-    with curve_path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["confidence", "precision", "recall", "TP", "FP", "FN"])
-        writer.writerows(zip(curve["thresholds"], curve["curve_precision"],
-                             curve["curve_recall"], curve["curve_tp"],
-                             curve["curve_fp"], curve["curve_fn"]))
-    if settings.get("save_plots", False):
-        _save_plots(run_dir, curve)
+    try:
+        with curve_path.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["confidence", "precision", "recall", "TP", "FP", "FN"])
+            writer.writerows(zip(curve["thresholds"], curve["curve_precision"],
+                                 curve["curve_recall"], curve["curve_tp"],
+                                 curve["curve_fp"], curve["curve_fn"]))
+        _check_cancelled(cancel_event)
+        if settings.get("save_plots", False):
+            _save_plots(run_dir, curve)
+        _check_cancelled(cancel_event)
+    except EvaluationCancelled:
+        shutil.rmtree(run_dir)
+        raise
     summary = {
         "model": str(model_file), "dataset": settings["source"],
         "source_mode": settings["mode"], "split": settings["split"],
@@ -548,6 +591,7 @@ def evaluate(settings: dict, emit, *, cache_only: bool = False):
         "class_name": names.get(str(class_id), f"class_{class_id}"),
         "iou_match_threshold": settings["match_iou"],
         "nms_iou_threshold": settings["nms_iou"],
+        "agnostic_nms": settings.get("agnostic_nms", False),
         "confidence_floor": CONF_FLOOR,
         "target_precision": settings["precision"],
         "target_reached": curve["target_reached"],
@@ -567,8 +611,14 @@ def evaluate(settings: dict, emit, *, cache_only: bool = False):
         "curve_csv": str(curve_path),
         "metric_definition": "Instance-level precision/recall; one-to-one greedy same-class IoU matching, not mass-weighted purity",
     }
-    (run_dir / "operating_point_summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        _check_cancelled(cancel_event)
+        (run_dir / "operating_point_summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        _check_cancelled(cancel_event)
+    except EvaluationCancelled:
+        shutil.rmtree(run_dir)
+        raise
     if curve["target_reached"]:
         emit("log", f"Confidence {curve['confidence']:.5f} | Precision {curve['precision']:.2%} "
                     f"| Recall {curve['recall']:.2%} | TP={curve['tp']} FP={curve['fp']} FN={curve['fn']}")
@@ -583,6 +633,19 @@ def evaluate(settings: dict, emit, *, cache_only: bool = False):
     return summary
 
 
+def open_results_folder(path: str | Path):
+    """Open a completed evaluation directory using the system file manager."""
+    folder = Path(path).expanduser().resolve()
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Results folder does not exist: {folder}")
+    if sys.platform == "win32":
+        os.startfile(str(folder))
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(folder)])
+    else:
+        subprocess.Popen(["xdg-open", str(folder)])
+
+
 class RecallTestGUI:
     def __init__(self, root, *, embedded=False, on_log=None):
         self.embedded = embedded
@@ -595,6 +658,8 @@ class RecallTestGUI:
         self.host = root
         self.messages = queue.Queue()
         self.busy = False
+        self.cancel_event = threading.Event()
+        self.last_results_dir = None
         self.model_var = tk.StringVar()
         self.mode_var = tk.StringVar(value="Dataset YAML")
         self.source_var = tk.StringVar()
@@ -610,10 +675,13 @@ class RecallTestGUI:
         self.device_var = tk.StringVar(value="Auto")
         self.reuse_var = tk.BooleanVar(value=True)
         self.plots_var = tk.BooleanVar(value=False)
+        self.agnostic_nms_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Choose a model and dataset. Inference at conf=0.01 is cached.")
         self.result_var = tk.StringVar(value="No evaluation run yet.")
         self.inputs = []
         self._build_ui()
+        if not self.embedded:
+            self.root.protocol("WM_DELETE_WINDOW", self._close_standalone)
         root.after(150, self._poll)
 
     def _build_ui(self):
@@ -696,15 +764,23 @@ class RecallTestGUI:
         reuse = ttk.Checkbutton(options, text="Reuse existing prediction cache", variable=self.reuse_var)
         reuse.pack(side="left", padx=(0, 25))
         plots = ttk.Checkbutton(options, text="Save precision/recall plot", variable=self.plots_var)
-        plots.pack(side="left")
-        self.inputs.extend((reuse, plots))
+        plots.pack(side="left", padx=(0, 25))
+        agnostic = ttk.Checkbutton(options, text="Class-agnostic NMS", variable=self.agnostic_nms_var)
+        agnostic.pack(side="left")
+        self.inputs.extend((reuse, plots, agnostic))
         actions = ttk.Frame(frame)
         actions.grid(row=10, column=0, columnspan=3, sticky="w", pady=(5, 10))
         run = ttk.Button(actions, text="Run / reuse cached predictions", command=lambda: self._start(False))
         self.run_button = run
         run.pack(side="left", padx=(0, 8))
         fast = ttk.Button(actions, text="Recalculate from cache only", command=lambda: self._start(True))
-        fast.pack(side="left")
+        fast.pack(side="left", padx=(0, 8))
+        self.stop_button = ttk.Button(actions, text="Stop evaluation", command=self.cancel,
+                                      state="disabled")
+        self.stop_button.pack(side="left", padx=(0, 8))
+        self.open_results_button = ttk.Button(actions, text="Open Results Folder",
+                                              command=self._open_results_folder, state="disabled")
+        self.open_results_button.pack(side="left")
         self.inputs.extend((run, fast))
         ttk.Label(frame, textvariable=self.status_var).grid(row=11, column=0, columnspan=3, sticky="w")
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
@@ -796,6 +872,7 @@ class RecallTestGUI:
                     split=self.split_var.get(), precision=precision, food_class=cls,
                     imgsz=imgsz, batch=batch, match_iou=match_iou,
                     nms_iou=nms_iou, max_det=max_det, device=self.device_var.get(),
+                    agnostic_nms=self.agnostic_nms_var.get(),
                     reuse_cache=self.reuse_var.get(), save_plots=self.plots_var.get())
 
     def _start(self, cache_only):
@@ -806,7 +883,11 @@ class RecallTestGUI:
         except ValueError as exc:
             messagebox.showerror("Invalid settings", str(exc), parent=self.root)
             return
+        self.cancel_event.clear()
         self.busy = True
+        self.last_results_dir = None
+        self.open_results_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
         for widget in self.inputs:
             widget.configure(state="disabled")
         self.status_var.set("Reading cache..." if cache_only else "Preparing predictions...")
@@ -815,10 +896,46 @@ class RecallTestGUI:
 
         def worker():
             try:
-                evaluate(settings, lambda kind, value: self.messages.put((kind, value)), cache_only=cache_only)
+                evaluate(settings, lambda kind, value: self.messages.put((kind, value)),
+                         cache_only=cache_only, cancel_event=self.cancel_event)
+            except EvaluationCancelled:
+                self.messages.put(("cancelled", "Evaluation stopped by user."))
             except Exception as exc:
                 self.messages.put(("error", str(exc), traceback.format_exc()))
         threading.Thread(target=worker, name="RecallPrecisionCached", daemon=True).start()
+
+    def cancel(self):
+        """Ask the worker to stop at the next safe checkpoint."""
+        if self.busy and not self.cancel_event.is_set():
+            self.cancel_event.set()
+            self.stop_button.configure(state="disabled")
+            self.status_var.set("Stopping evaluation (finishing current inference step)…")
+            self._append_log("Stop requested; waiting for current inference step to finish.")
+
+    def _open_results_folder(self):
+        if not self.last_results_dir:
+            return
+        try:
+            open_results_folder(self.last_results_dir)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Cannot open results folder", str(exc), parent=self.root)
+
+    def _close_standalone(self):
+        if self.busy:
+            if not messagebox.askyesno("Evaluation running",
+                    "Stop evaluation and close after the current inference step?",
+                    parent=self.root):
+                return
+            self.cancel()
+            self._close_after_stop()
+        else:
+            self.root.destroy()
+
+    def _close_after_stop(self):
+        if self.busy:
+            self.root.after(200, self._close_after_stop)
+        else:
+            self.root.destroy()
 
     def _append_log(self, message):
         if self.on_log is not None:
@@ -841,6 +958,8 @@ class RecallTestGUI:
                     self.status_var.set(value)
                 elif kind == "done":
                     self._finish()
+                    self.last_results_dir = value["output_directory"]
+                    self.open_results_button.configure(state="normal")
                     if value["target_reached"]:
                         self.result_var.set(
                             f"{value['class_name']} · confidence {value['confidence_threshold']:.5f} · "
@@ -852,6 +971,11 @@ class RecallTestGUI:
                     else:
                         self.result_var.set(f"Target {value['target_precision']:.1%} not reached.")
                     self.status_var.set("Saved in " + value["output_directory"])
+                elif kind == "cancelled":
+                    self._finish()
+                    self.status_var.set("Evaluation stopped.")
+                    self.result_var.set("Cancelled — no partial evaluation result saved.")
+                    self._append_log(str(value))
                 elif kind == "error":
                     self._finish()
                     details = message[2] if len(message) > 2 else str(value)
@@ -867,6 +991,7 @@ class RecallTestGUI:
     def _finish(self):
         self.busy = False
         self.progress.stop()
+        self.stop_button.configure(state="disabled")
         for widget in self.inputs:
             widget.configure(state="normal")
         self.mode_choice.configure(state="readonly")

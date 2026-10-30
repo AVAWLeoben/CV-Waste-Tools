@@ -1,0 +1,21 @@
+CV Waste Studio v10.3 — Recall@Precision evaluation convenience update
+
+1. Added a "Class-agnostic NMS" checkbox, off by default, to the
+   Precision / recall evaluation options. Its value is passed to Ultralytics
+   model.predict(agnostic_nms=...). The chosen value is saved in prediction
+   cache metadata and operating_point_summary.json.
+
+2. The prediction cache identity includes agnostic_nms when enabled, so a
+   cache generated with class-aware NMS is never reused for class-agnostic
+   NMS (or vice versa). The disabled setting uses the previous cache key,
+   preserving older cached inference results.
+
+3. Added an "Open Results Folder" button beside the evaluation controls.
+   It becomes enabled after an evaluation successfully saves its output.
+   It opens exactly the output_directory returned by that completed run
+   in Windows Explorer (or the native file manager on macOS/Linux).
+   The button remains disabled before a successful run, during a new run,
+   and after a stopped or failed run.
+
+4. Existing stop/cancellation and cached evaluation behaviour is unchanged.
+   Neither training nor the training dataloader is modified.

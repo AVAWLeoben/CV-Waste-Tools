@@ -1,0 +1,23 @@
+CV Waste Studio v10.2 — Stop Recall@Precision Evaluation
+========================================================
+
+New Stop evaluation button in 03 Precision / recall, beside Run / reuse
+cached predictions and Recalculate from cache only.
+
+- Enabled while Recall@Precision evaluation is running; disabled when idle.
+- Stops the Ultralytics streaming prediction after the current inference result
+  is returned (cooperative cancellation, not forced termination of CUDA work).
+- Also checks for Stop during ground-truth scanning and IoU confidence matching.
+- Stops before saving an incomplete inference cache or evaluation result.
+- Existing complete prediction caches remain available for later reuse.
+- On cancellation, the status displays "Evaluation stopped" and the form
+  is re-enabled without an error popup.
+- Closing Studio while Recall@Precision is active requests a safe stop and
+  waits for the worker to finish before closing.
+
+Changes limited to test_model_recall_at_precision.py and
+ greenplast_launcher.py, plus one focused test module and this note.
+
+Checks: 55 unit tests passed under Xvfb, including five new cancellation
+ checks; Python syntax compilation passed. GPU inference on Windows was not
+ exercised in this environment.
