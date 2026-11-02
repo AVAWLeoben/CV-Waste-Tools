@@ -27,6 +27,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import traceback
 
+from recall_report import load_evaluation, saved_evaluations, save_evaluation_report, REPORT_NAME
+
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
@@ -426,13 +428,13 @@ def compute_curve(pred: dict, gt_by_image: list, food_class: int,
                   target: float, match_iou: float, cancel_event=None):
     """Exact greedy confidence-ranked class-aware IoU matching, run only on CPU.
 
-    A Food detection is TP iff it matches an as-yet-unmatched Food GT with IoU
-    >= match_iou. Non-Food GT matched by Food prediction are never Food TP.
+    A target-class detection is TP iff it matches an unmatched target-class
+    ground-truth box with IoU >= match_iou. Other classes never count as TP.
     """
     import numpy as np
     gt_count = sum(int(np.count_nonzero(gt[:, 0] == food_class)) for gt in gt_by_image)
     if not gt_count:
-        raise ValueError(f"There are no ground-truth instances of Food class {food_class} in this split.")
+        raise ValueError(f"There are no ground-truth instances of target class {food_class} in this split.")
     pred_mask = (pred["classes"] == food_class) & (pred["confidence"] >= CONF_FLOOR)
     conf = np.asarray(pred["confidence"][pred_mask], dtype=np.float64)
     image_indices = np.asarray(pred["image_index"][pred_mask], dtype=np.int32)
@@ -509,8 +511,8 @@ def _save_plots(output: Path, curve: dict):
     import matplotlib.pyplot as plt
     c = curve["thresholds"]
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(c, curve["curve_precision"], label="Food precision")
-    ax.plot(c, curve["curve_recall"], label="Food recall")
+    ax.plot(c, curve["curve_precision"], label="Target-class precision")
+    ax.plot(c, curve["curve_recall"], label="Target-class recall")
     ax.axhline(curve["target_precision"], linestyle="--", linewidth=1,
                label=f"Target precision ({curve['target_precision']:.0%})")
     if curve["confidence"] is not None:
@@ -609,9 +611,19 @@ def evaluate(settings: dict, emit, *, cache_only: bool = False, cancel_event=Non
         "prediction_cache": str(cache_path),
         "output_directory": str(run_dir),
         "curve_csv": str(curve_path),
+        "report_png": None,
         "metric_definition": "Instance-level precision/recall; one-to-one greedy same-class IoU matching, not mass-weighted purity",
     }
     try:
+        _check_cancelled(cancel_event)
+        try:
+            report_path = save_evaluation_report(summary)
+            summary["report_png"] = str(report_path)
+            emit("log", f"Saved evaluation graphic: {report_path}")
+        except Exception as exc:
+            # A plotting failure must never invalidate an otherwise completed
+            # evaluation or require re-running expensive GPU inference.
+            emit("log", f"Warning: Could not create evaluation graphic: {exc}")
         _check_cancelled(cancel_event)
         (run_dir / "operating_point_summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -660,6 +672,8 @@ class RecallTestGUI:
         self.busy = False
         self.cancel_event = threading.Event()
         self.last_results_dir = None
+        self.recent_paths = []
+        self.recent_var = tk.StringVar()
         self.model_var = tk.StringVar()
         self.mode_var = tk.StringVar(value="Dataset YAML")
         self.source_var = tk.StringVar()
@@ -693,9 +707,11 @@ class RecallTestGUI:
         frame = ttk.Frame(self.host, padding=16)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(15, weight=1)
+        frame.rowconfigure(16, weight=1)
         ttk.Label(frame, text="Cached Recall at Target Precision", font=("Segoe UI", 17, "bold")).grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(0, 5))
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        ttk.Button(frame, text="Open saved test...", command=self._browse_saved_result).grid(
+            row=0, column=2, sticky="e", pady=(0, 5))
         ttk.Label(frame, text="One Ultralytics batched prediction pass at conf=0.01. Reuse saved boxes for instant confidence sweeps.",
                   foreground="#555555").grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
 
@@ -735,7 +751,7 @@ class RecallTestGUI:
 
         controls = ttk.Frame(frame)
         controls.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 4))
-        specs = [("Target precision %", self.precision_var), ("Food class", self.class_var),
+        specs = [("Target precision %", self.precision_var), ("Target Class", self.class_var),
                  ("Image size", self.imgsz_var), ("Batch", self.batch_var),
                  ("Match IoU", self.match_var), ("NMS IoU", self.nms_var),
                  ("Max detections", self.maxdet_var)]
@@ -780,17 +796,33 @@ class RecallTestGUI:
         self.stop_button.pack(side="left", padx=(0, 8))
         self.open_results_button = ttk.Button(actions, text="Open Results Folder",
                                               command=self._open_results_folder, state="disabled")
-        self.open_results_button.pack(side="left")
+        self.open_results_button.pack(side="left", padx=(0, 8))
+        self.view_report_button = ttk.Button(actions, text="View graphic",
+                                             state="disabled", command=self._view_report)
+        self.view_report_button.pack(side="left")
         self.inputs.extend((run, fast))
-        ttk.Label(frame, textvariable=self.status_var).grid(row=11, column=0, columnspan=3, sticky="w")
+        previous = ttk.Frame(frame)
+        previous.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        ttk.Label(previous, text="Previous evaluations").pack(side="left", padx=(0, 8))
+        self.recent_choice = ttk.Combobox(previous, textvariable=self.recent_var,
+                                          state="readonly", width=35)
+        self.recent_choice.pack(side="left", padx=(0, 6))
+        self.load_recent_button = ttk.Button(previous, text="Load selected",
+                                              command=self._load_selected_result)
+        self.load_recent_button.pack(side="left", padx=(0, 6))
+        ttk.Button(previous, text="Browse saved result...",
+                   command=self._browse_saved_result).pack(side="left", padx=(0, 6))
+        ttk.Button(previous, text="Refresh", command=self._refresh_previous_runs).pack(side="left")
+        self._refresh_previous_runs()
+        ttk.Label(frame, textvariable=self.status_var).grid(row=12, column=0, columnspan=3, sticky="w")
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
-        self.progress.grid(row=12, column=0, columnspan=3, sticky="ew", pady=6)
+        self.progress.grid(row=13, column=0, columnspan=3, sticky="ew", pady=6)
         ttk.Label(frame, textvariable=self.result_var, font=("Segoe UI", 11, "bold"),
-                  wraplength=920).grid(row=13, column=0, columnspan=3, sticky="w", pady=(3, 10))
-        ttk.Label(frame, text="Metrics: one-to-one Food IoU matching (object count), NOT mass-weighted sorting purity.",
-                  foreground="#555555").grid(row=14, column=0, columnspan=3, sticky="w", pady=(0, 8))
+                  wraplength=920).grid(row=14, column=0, columnspan=3, sticky="w", pady=(3, 10))
+        ttk.Label(frame, text="Metrics: one-to-one target-class IoU matching (object count), NOT mass-weighted sorting purity.",
+                  foreground="#555555").grid(row=15, column=0, columnspan=3, sticky="w", pady=(0, 8))
         log_frame = ttk.Frame(frame)
-        log_frame.grid(row=15, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=16, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log = tk.Text(log_frame, state="disabled", height=8, wrap="word",
@@ -801,7 +833,99 @@ class RecallTestGUI:
         self.log.configure(yscrollcommand=scrollbar.set)
         if self.embedded:
             log_frame.grid_remove()
-            frame.rowconfigure(15, weight=0)
+            frame.rowconfigure(16, weight=0)
+
+    def _refresh_previous_runs(self):
+        self.recent_paths = saved_evaluations(self.output_var.get())[:50]
+        display = [path.name.removeprefix("precision_recall_") for path in self.recent_paths]
+        self.recent_choice.configure(values=display)
+        self.recent_var.set(display[0] if display else "")
+        self.load_recent_button.configure(state="normal" if display else "disabled")
+
+    def _load_selected_result(self):
+        index = self.recent_choice.current()
+        if index < 0 or index >= len(self.recent_paths):
+            return
+        self._load_saved_result(self.recent_paths[index])
+
+    def _browse_saved_result(self):
+        folder = filedialog.askdirectory(parent=self.root,
+            title="Select a completed precision_recall_* results folder",
+            initialdir=self.output_var.get() if Path(self.output_var.get()).is_dir() else str(Path.cwd()))
+        if folder:
+            self._load_saved_result(folder)
+
+    def _load_saved_result(self, folder):
+        if self.busy:
+            messagebox.showinfo("Evaluation running", "Stop the current evaluation before opening an older result.",
+                                parent=self.root)
+            return
+        try:
+            summary = load_evaluation(folder)
+            report = Path(summary["output_directory"]) / REPORT_NAME
+            if not report.is_file():
+                try:
+                    save_evaluation_report(summary)
+                except Exception as exc:
+                    self._append_log(f"Could not create graphic for this older result: {exc}")
+            self._show_result(summary, from_disk=True)
+            self._append_log(f"Reopened saved evaluation: {summary['output_directory']}")
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Cannot load evaluation", str(exc), parent=self.root)
+
+    def _show_result(self, summary, *, from_disk=False):
+        self.last_results_dir = str(summary["output_directory"])
+        self.open_results_button.configure(state="normal")
+        self.view_report_button.configure(
+            state="normal" if (Path(self.last_results_dir) / REPORT_NAME).is_file() else "disabled")
+        if summary["target_reached"]:
+            self.result_var.set(
+                f"{summary['class_name']} · confidence {summary['confidence_threshold']:.5f} · "
+                f"precision {summary['achieved_precision']:.2%} · "
+                f"recall {summary['recall_at_precision']:.2%} "
+                f"(TP {summary['true_positives']}, FP {summary['false_positives']}, "
+                f"FN {summary['false_negatives']})"
+            )
+        else:
+            self.result_var.set(f"Target {summary['target_precision']:.1%} not reached.")
+        self.status_var.set(("Loaded saved evaluation: " if from_disk else "Saved in ")
+                            + self.last_results_dir)
+
+    def _view_report(self):
+        if not self.last_results_dir:
+            return
+        path = Path(self.last_results_dir) / REPORT_NAME
+        if not path.is_file():
+            messagebox.showerror("Graphic unavailable", "No summary graphic was saved for this evaluation.",
+                                 parent=self.root)
+            return
+        try:
+            from PIL import Image, ImageTk
+            image = Image.open(path)
+            preview = tk.Toplevel(self.root)
+            preview.title(f"Evaluation graphic · {path.parent.name}")
+            preview.geometry("1120x750")
+            preview.minsize(640, 450)
+            holder = ttk.Frame(preview, padding=10)
+            holder.pack(fill="both", expand=True)
+            panel = ttk.Label(holder)
+            panel.pack(fill="both", expand=True)
+            def update_preview(_event=None):
+                width = max(1, panel.winfo_width() - 8)
+                height = max(1, panel.winfo_height() - 8)
+                if width < 20 or height < 20:
+                    return
+                frame = image.copy()
+                frame.thumbnail((width, height), Image.Resampling.LANCZOS)
+                picture = ImageTk.PhotoImage(frame, master=preview)
+                panel.configure(image=picture)
+                panel.image = picture
+            panel.bind("<Configure>", update_preview)
+            ttk.Button(preview, text="Open Results Folder",
+                       command=self._open_results_folder).pack(pady=(0, 8))
+            preview.after(75, update_preview)
+        except Exception as exc:
+            messagebox.showerror("Cannot view graphic", str(exc), parent=self.root)
 
     def _mode_changed(self):
         yaml = self.mode_var.get() == "Dataset YAML"
@@ -839,6 +963,7 @@ class RecallTestGUI:
         path = filedialog.askdirectory(parent=self.root, title="Choose results folder", mustexist=True)
         if path:
             self.output_var.set(path)
+            self._refresh_previous_runs()
 
     def _settings(self):
         model_text = self.model_var.get().strip().strip('"')
@@ -887,6 +1012,7 @@ class RecallTestGUI:
         self.busy = True
         self.last_results_dir = None
         self.open_results_button.configure(state="disabled")
+        self.view_report_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         for widget in self.inputs:
             widget.configure(state="disabled")
@@ -958,19 +1084,8 @@ class RecallTestGUI:
                     self.status_var.set(value)
                 elif kind == "done":
                     self._finish()
-                    self.last_results_dir = value["output_directory"]
-                    self.open_results_button.configure(state="normal")
-                    if value["target_reached"]:
-                        self.result_var.set(
-                            f"{value['class_name']} · confidence {value['confidence_threshold']:.5f} · "
-                            f"precision {value['achieved_precision']:.2%} · "
-                            f"recall {value['recall_at_precision']:.2%} "
-                            f"(TP {value['true_positives']}, FP {value['false_positives']}, "
-                            f"FN {value['false_negatives']})"
-                        )
-                    else:
-                        self.result_var.set(f"Target {value['target_precision']:.1%} not reached.")
-                    self.status_var.set("Saved in " + value["output_directory"])
+                    self._show_result(value)
+                    self._refresh_previous_runs()
                 elif kind == "cancelled":
                     self._finish()
                     self.status_var.set("Evaluation stopped.")

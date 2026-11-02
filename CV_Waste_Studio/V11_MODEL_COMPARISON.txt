@@ -1,0 +1,68 @@
+CV WASTE STUDIO v11 — MODEL COMPARISON
+======================================
+
+NEW SIDEBAR SECTION
+  05  Model comparison
+
+WHAT IT DOES
+  1. Browse to an existing YOLO data.yaml with train, val AND test entries.
+  2. Queue 2–20 models. Use YOLO 8 / 11 / 26 pretrained sizes n/s/m/l/x,
+     or add a trained .pt checkpoint to fine-tune.
+  3. Choose SHARED training settings (epochs or hours per model, batch size,
+     image size, caching, workers, CLS weight, augmentation, device, opt-in
+     CUDA installation, and output directory). Choose a separate test batch.
+  4. Start. Studio trains the models in queue order, each via the original
+     run_training_job.py -> autosplit_and_train_model -> YOLO.train() path.
+  5. After EACH training child has fully exited, a separate Python process
+     evaluates that model's best.pt using YOLO.val(split="test"). The native
+     Ultralytics validation engine calculates precision, recall, mAP50,
+     mAP50–95 and produces its usual test plots.
+  6. The comparison view shows a model queue, model/epoch/batch progress,
+     live training curves, test-set bar charts and a metric table.
+
+RESOURCE SAFETY
+  * Every training job and every test evaluation launches in a separate
+    Python process. This is the primary CUDA/OOM protection: a completed
+    process releases its CUDA context and worker RAM before the next starts.
+  * The test worker additionally runs gc.collect(), torch.cuda.empty_cache()
+    and torch.cuda.ipc_collect() when supported; process exit is definitive.
+  * On GPU OOM, training can retry with batch size halved (up to twice).
+    Test evaluation reduces its batch until it fits or reaches 1.
+  * The Windows main entry points have if __name__ == '__main__ guards and
+    multiprocessing.freeze_support() so dataloader worker spawn is safe.
+  * Existing training script's KMP_DUPLICATE_LIB_OK workaround is scoped
+    to spawned job environments, not the Windows shell; disabling or
+    resolving genuinely conflicting OpenMP DLLs is preferable when possible.
+  * Disk-cache auto-cleanup and manifest recovery are reused for each job.
+  * Stop uses taskkill /T /F on Windows or SIGTERM on the process group on
+    Unix to stop the active model and its dataloader workers. Completed
+    comparison rows are saved even when later runs fail or are stopped.
+
+OUTPUT STRUCTURE
+  <comparison output folder>/Comparison_<timestamp>/
+    settings.json                 Comparison-wide settings
+    comparison.json              Machine-readable summary
+    comparison.csv               Side-by-side test metrics
+    01_<model>_train.log         Per-model detailed training log
+    01_<model>_test.log          Per-model detailed test log
+    training/<run>/              Native Ultralytics results.csv / weights/
+    test/<run>/                  Native Ultralytics test plots
+
+The comparison always uses the same input YAML. It does NOT create or modify
+train/val/test splits. It does NOT evaluate the test set during training.
+Its test scores are from held-out test labels, not the validation split.
+
+IMPORTANT: Keep the test split genuinely independent, ideally grouped by
+camera/recording/session; repeated tuning against test results can overfit
+model selection to that test set. Training still uses the val split for
+checkpoint selection. Comparisons may require a large amount of GPU memory
+and disk space. Avoid running another model job in a separate Studio window
+against the same dataset while disk cache cleanup is enabled.
+
+COMPATIBILITY / TESTING
+  Built from v10.4. No changes to training engine, split implementation,
+  pre-annotation, audit, Precision@Recall evaluation, icon or launcher scripts.
+  Existing 64 tests plus 10 new tests pass (74 total, 8 environmental skips).
+  Python syntax and embedded GUI smoke checks pass at 1290 x 845 pixels.
+  Full CUDA/GPU training and Windows process-tree behaviour must still be
+  verified on the target machine.

@@ -1,0 +1,57 @@
+CV WASTE STUDIO v11.1 — YOLO ARCHITECTURE SCREENING
+===================================================
+
+PURPOSE
+Find a strong pretrained model family/scale for subsequent fine-tuning, without
+using the held-out test split to repeatedly choose architectures.
+
+05 MODEL COMPARISON — NEW DEFAULT MODE
+- Architecture screening: enabled by default in GUI.
+- Queue 2–20 pretrained detection models from YOLOv8, YOLOv10, YOLO11,
+  YOLO12, or YOLO26 in sizes n, s, m, l, x.
+- Choose one model with '+ Add pretrained', add all five scales of the selected
+  generation with '+ Sweep sizes', or add m/l from each generation with
+  '+ Sweep generations'. Duplicates are skipped; the 20-model cap remains.
+- A screening YAML requires train/val but does not require test.
+- All candidates use the same user-entered training settings. New GUI default
+  is 30 epochs for quick architecture screening; change as needed.
+- Each candidate trains in its own process through existing Ultralytics YOLO.train.
+- A separate subprocess evaluates each candidate's best.pt using native
+  Ultralytics YOLO.val(split='val'). The test split is NEVER evaluated in
+  screening mode.
+- The dashboard compares validation mAP50–95, mAP50, precision, recall,
+  best logged validation epoch, training duration, and checkpoint size.
+- 'Copy top checkpoint path' copies the highest-mAP50–95 completed checkpoint,
+  or the selected table row, for loading under 01 Dataset & Training.
+- Outputs are saved to comparison.json and comparison.csv, recording which
+  split was evaluated and whether screening mode was enabled.
+
+FULL TEST COMPARISON (EXISTING BEHAVIOR)
+- Uncheck Architecture screening. The YAML must have a test split.
+- All candidate checkpoints are evaluated on test, as in v11.
+- To prevent test-set selection bias, use this sparingly for final shortlisted
+  models; use the validation screening for iterative architecture choice.
+- Old settings JSON without screening_mode remain full comparison by default.
+
+RECOMMENDED METHOD
+1. Sweep m/l across generations at one fixed resolution, training duration,
+   augmentation recipe and dataset split. For a longer sweep, n/s/x too.
+2. Compare validation scores and training time, checking variation between
+   similarly performing candidates before selecting a small shortlist.
+3. Train the shortlist longer (and possibly at the intended deployment
+   resolution). Use the best weights as a warm start for fine-tuning.
+4. Reserve the test split for the final independent comparison.
+
+LIMITS
+- No GPU training was run for this release; actual architecture support
+  depends on the installed Ultralytics version and model downloads.
+- Architecture screening supports Ultralytics YOLO detection model families;
+  transformer architectures such as RT-DETR are not included.
+- Training time is wall time across training attempts including OOM retries;
+  check that batch settings match before treating times as a hardware benchmark.
+- Ultralytics 'results.csv' peak validation epoch is not always the exact
+  checkpoint-selection epoch. Scores shown in screening come from evaluating
+  the actual best.pt weights on the validation split.
+- The OpenMP duplicate-DLL compatibility setting remains scoped to workers.
+- Data-split creation, training in section 01, annotation audit, precision/
+  recall, training results, launcher and branding are unchanged.

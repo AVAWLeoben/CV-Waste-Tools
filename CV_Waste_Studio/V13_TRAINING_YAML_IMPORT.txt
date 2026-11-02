@@ -1,0 +1,40 @@
+CV Waste Studio v13 — Reuse Ultralytics tuning/training YAML
+============================================================
+
+01 Datasets & training > 2. Model & training:
+- Click Browse / import… and choose an Ultralytics train-run args.yaml,
+  or a tune-run best_hyperparameters.yaml (or your exported copy).
+- Review four groups: GUI fields, augmentation, advanced model.train settings,
+  and skipped/protected fields. Click Apply settings to commit.
+- Native hyperparameters such as lr0, lrf, optimizer, momentum, weight_decay,
+  warmup_epochs, box, dfl, rect, cos_lr, patience, seed, freeze, amp,
+  as well as augmentation overrides are now applied at training time.
+- The selected YAML values for epochs/time, batch, imgsz, cache, workers,
+  cls and device populate visible fields. You may still edit them afterward.
+- Imported advanced settings appear in the training job log and flow through:
+  training GUI -> logs/*.json -> run_training_job.py ->
+  autosplit_and_train_model -> YOLO(...).train(**kwargs).
+- Data YAML, model weights, project, run name and split control remain under
+  Studio's GUI control. The old run's model/data/output/other run-routing
+  fields are displayed as ignored, not silently imported.
+- A safe allowlist prevents unrelated prediction/export options from becoming
+  training kwargs. Check the preview's ignored list for unsupported keys.
+- Remove import clears advanced overrides, leaving the visible settings as
+  currently edited so no accidental data or settings are lost.
+
+06 Hyperparameter Tuning > monitor:
+- Ultralytics already saves best_hyperparameters.yaml in its results folder.
+- A new Export best YAML… button copies that file to a chosen destination.
+  Alternatively, copy the source path and import it directly in Training.
+
+Important:
+- args.yaml generally holds a full training configuration while
+  best_hyperparameters.yaml holds only the tuned parameter values.
+- Loading best_hyperparameters.yaml does NOT automatically select a dataset,
+  checkpoint or retrain a model. Choose them explicitly, set epochs, and train.
+- If YAML supplies incompatible values or unsupported keys, the preview
+  identifies them; invalid supported values are rejected before starting.
+- Native Ultralytics/CUDA training has not been run here; the job argument
+  hand-off has been tested with an instrumented YOLO.train mock.
+
+Tests: python -m unittest discover -s tests -v

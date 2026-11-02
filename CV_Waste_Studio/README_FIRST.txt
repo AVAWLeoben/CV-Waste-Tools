@@ -1,3 +1,9 @@
+CV WASTE STUDIO v12 — HYPERPARAMETER TUNING
+=================================================
+New: 06 Hyperparameter tuning with native Ultralytics YOLO.tune(), editable
+search ranges, live interactive trial graphs, stop, resume/extend, and best
+checkpoint/hyperparameter export. See V12_NATIVE_HYPERPARAMETER_TUNING.txt.
+
 CV WASTE STUDIO — SINGLE-WINDOW MODEL TOOLS
 ===========================================
 

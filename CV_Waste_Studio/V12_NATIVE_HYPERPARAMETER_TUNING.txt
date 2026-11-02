@@ -1,0 +1,63 @@
+CV Waste Studio v12 — Native Ultralytics Hyperparameter Tuning
+============================================================
+
+New section 06 Hyperparameter tuning
+-----------------------------------
+- Uses Ultralytics YOLO(model_file).tune(use_ray=False, ...) directly.
+- Trains one candidate model repeatedly using native Ultralytics evolutionary search.
+- No Studio hyperparameter search algorithm and no custom dataloader/training loop.
+- Requires existing YOLO data.yaml with train/val; deliberately does not use test.
+- Supports pretrained weights or your previously selected architecture/checkpoint.
+- Budget: trials, epochs/trial, batch, imgsz, workers, optimizer, device, cache.
+- Select Core, Balanced, Augmentation or Full native search; edit min/max per parameter.
+- Default cache is OFF; disk cache if enabled is cleaned after completion/failure,
+  preserving .npy files that existed before this tuning job. The GUI also handles
+  post-force-stop cleanup from a saved manifest.
+- Native tuner runs trial training subprocesses sequentially; Windows launcher is
+  protected by if __name__ == '__main__' and multiprocessing.freeze_support().
+- KMP_DUPLICATE_LIB_OK workaround applies to the headless job environment.
+
+Interactive monitoring
+----------------------
+- Main progress bar counts completed trials; second bar shows epoch progress
+  within the active trial when Ultralytics prints epoch progress.
+- Fitness by trial and best-so-far.
+- Validation mAP50, mAP50–95, recall.
+- Selected hyperparameter evolution across trials.
+- Selected hyperparameter vs fitness scatter.
+- Individual dots, axis ticks, hover highlighting, animated enlargement, close X.
+- Trial table, best-trial card and complete per-trial parameter inspection.
+- Native results and best weights can be opened from the Studio page.
+- Stop requests terminate the native tuning process tree; completed trial
+  records/checkpoints persist. Previous tuning folders can be opened without
+  rerunning training. A saved Studio tuning run can be resumed or extended.
+
+Outputs
+-------
+    <data.yaml parent>/hyperparameter_tuning/Tune_<timestamp>/
+        tune_results.ndjson
+        best_hyperparameters.yaml
+        weights/best.pt
+        weights/last.pt (if emitted by installed Ultralytics)
+        tune_fitness.png, tune_scatter_plots.png (native Ultralytics)
+        studio_tuning_settings.json (after completion)
+
+Also: <output root>/<name>.studio_tuning_settings.json for interrupted-run resume.
+Studio execution settings and full stdout log are kept under Studio/logs/.
+
+Compatibility: verified against Ultralytics v8.4.40 native tune() source
+and the documented API. Exact output content may vary with later versions.
+The search requires sufficient time: iterations * epochs are full model
+trainings. E.g. 20 trials x 25 epochs = up to 500 training epochs.
+
+Important
+---------
+- Model selection is based on validation fitness. Reserve test for final checks.
+- RAM cache + multiple Windows workers can exhaust memory; off is default.
+- Native tuning may download model weights if not present locally.
+- Do not start GPU-heavy jobs in multiple separate Studio windows simultaneously.
+- GUI tests and mocked native tuner tests do NOT replace a full Windows/CUDA
+  training test in your managed environment.
+
+Existing sections 01 through 05, their training engine and launch scripts
+were not refactored for this update.

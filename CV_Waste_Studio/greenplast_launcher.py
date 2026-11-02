@@ -51,6 +51,8 @@ PAGE_TEXT = {
     "recall": ("Precision / recall", "Evaluate recall at your required precision using reusable inference results."),
     "system": ("Environment & setup", "Verify the Conda environment, inspect GPU support and access logs."),
     "results": ("Training results", "Explore completed Ultralytics runs, training curves and validation plots."),
+    "comparison": ("Model comparison", "Train a queue of YOLO models sequentially and compare on the dataset test split."),
+    "tuning": ("Hyperparameter tuning", "Explore native Ultralytics tuning trials and validation performance."),
 }
 
 
@@ -84,13 +86,15 @@ class Studio:
         self.logs = {key: deque(maxlen=1000) for key in PAGE_TEXT}
         self.session_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.activity_paths = {key: APP_DIR / "logs" / f"studio_{key}_{self.session_stamp}.log"
-                               for key in ("system", "audit", "recall")}
+                               for key in ("system", "audit", "recall", "comparison", "tuning")}
         self.train_job = None
         self.best_epoch_tracker = BestEpochTracker()
         self.train_button = None
         self.settings_expanded = False
         self.audit_gui = None
         self.recall_gui = None
+        self.comparison_panel = None
+        self.tuning_panel = None
         self._style()
         self._layout()
         self.root.after(160, self._tick)
@@ -164,6 +168,8 @@ class Studio:
             ("audit", "02", "Annotation audit"),
             ("recall", "03", "Precision / recall"),
             ("results", "04", "Training results"),
+            ("comparison", "05", "Model comparison"),
+            ("tuning", "06", "Hyperparameter tuning"),
         )
         for key, number, label in nav_items:
             self._nav_button(sidebar, key, f"{number}   {label}")
@@ -383,7 +389,7 @@ class Studio:
         self.graph_frame.pack_forget()
         self.log_text_frame.pack_forget()
 
-        if self.active == "results":
+        if self.active in ("results", "comparison", "tuning"):
             self.page_card.pack(fill="both", expand=True, padx=26, pady=(0, 18))
             self.page_card.pack_propagate(True)
             return
@@ -523,7 +529,8 @@ class Studio:
             return
         if (self.train_job and self.train_job["process"].poll() is None) or (
                 self.audit_gui and self.audit_gui.busy) or (
-                self.recall_gui and self.recall_gui.busy):
+                self.recall_gui and self.recall_gui.busy) or (
+                self.comparison_panel and self.comparison_panel.busy):
             messagebox.showwarning("Tasks running", "Finish ongoing tool operations before repairing the environment.", parent=self.root)
             return
         self.env_busy = True
@@ -654,11 +661,15 @@ class Studio:
             from train_and_split_tool_GUI import _all_in_one_gui
             from audit_dataset_review_gui import AuditGUI
             from test_model_recall_at_precision import RecallTestGUI
+            from model_comparison_ui import ModelComparisonPanel
+            from hyperparameter_tuning_ui import HyperparameterTuningPanel
             train = tk.Frame(self.content, bg=SURFACE)
             audit = tk.Frame(self.content, bg=SURFACE)
             recall = tk.Frame(self.content, bg=SURFACE)
             results = tk.Frame(self.content, bg=SURFACE)
-            self.pages.update(train=train, audit=audit, recall=recall, results=results)
+            comparison = tk.Frame(self.content, bg=SURFACE)
+            tuning = tk.Frame(self.content, bg=SURFACE)
+            self.pages.update(train=train, audit=audit, recall=recall, results=results, comparison=comparison, tuning=tuning)
             train_controls = ttk.Frame(train, padding=(20, 12, 20, 0))
             train_controls.pack(fill="x")
             self.train_state = tk.StringVar(value="Ready · split datasets or train existing YOLO splits")
@@ -681,6 +692,24 @@ class Studio:
             self.results_panel = TrainingResultsPanel(results, APP_DIR / "logs",
                 on_log=lambda line: self.log_line("results", line))
             self.results_panel.pack(fill="both", expand=True)
+            self.comparison_panel = ModelComparisonPanel(
+                comparison, env_python=lambda: env_python(self.env),
+                process_env=lambda: process_environment(self.env),
+                logs_dir=APP_DIR / "logs",
+                on_log=lambda line: self.log_line("comparison", line),
+                can_start=lambda: self.train_job is None and not (
+                    self.recall_gui and self.recall_gui.busy) and not (
+                    self.audit_gui and self.audit_gui.busy))
+            self.comparison_panel.pack(fill="both", expand=True)
+            self.tuning_panel = HyperparameterTuningPanel(
+                tuning, env_python=lambda: env_python(self.env),
+                process_env=lambda: process_environment(self.env),
+                logs_dir=APP_DIR / "logs", on_log=lambda line: self.log_line("tuning", line),
+                can_start=lambda: self.train_job is None and not (
+                    self.comparison_panel and self.comparison_panel.busy) and not (
+                    self.recall_gui and self.recall_gui.busy) and not (
+                    self.audit_gui and self.audit_gui.busy))
+            self.tuning_panel.pack(fill="both", expand=True)
         except Exception as exc:
             import traceback
             self.log_line("system", "ERROR loading tool panels:\n" + traceback.format_exc())
@@ -693,6 +722,8 @@ class Studio:
         self.log_line("audit", "Ready. The audit reads annotations without modifying them.")
         self.log_line("recall", "Ready. Cached predictions can be reused for new precision thresholds.")
         self.log_line("results", "Select a recent training run or browse to an Ultralytics run folder.")
+        self.log_line("comparison", "Queue models to compare them on one YAML test split.")
+        self.log_line("tuning", "Native Ultralytics tuning: choose weights, tune on train/val, inspect trial fitness.")
 
     def start_training(self, settings):
         self._start_job(settings, "train")
@@ -701,8 +732,14 @@ class Studio:
         self._start_job(settings, "preannotate")
 
     def _start_job(self, settings, kind):
-        if self.train_job is not None:
-            messagebox.showwarning("Job in progress", "Another dataset job is running.", parent=self.root)
+        if (self.tuning_panel and self.tuning_panel.busy) or (
+                self.comparison_panel and self.comparison_panel.busy):
+            messagebox.showwarning("GPU job active",
+                "Wait for the active tuning or model comparison run to finish before starting training.",
+                parent=self.root)
+            return
+        if self.train_job is not None or (self.comparison_panel and self.comparison_panel.busy):
+            messagebox.showwarning("Job in progress", "A dataset or model-comparison job is running.", parent=self.root)
             return
         logdir = APP_DIR / "logs"
         logdir.mkdir(parents=True, exist_ok=True)
@@ -890,6 +927,10 @@ class Studio:
         except queue.Empty:
             pass
         self._poll_training()
+        if self.comparison_panel is not None:
+            self.comparison_panel.poll()
+        if self.tuning_panel is not None:
+            self.tuning_panel.poll()
         try:
             if self.root.winfo_exists():
                 self.root.after(200, self._tick)
@@ -914,10 +955,22 @@ class Studio:
         active_train = self.train_job and self.train_job["process"].poll() is None
         active_audit = self.audit_gui and self.audit_gui.busy
         active_recall = self.recall_gui and self.recall_gui.busy
+        active_comparison = self.comparison_panel and self.comparison_panel.busy
+        active_tuning = self.tuning_panel and self.tuning_panel.busy
         if active_train and not messagebox.askyesno(
                 "Training is still running",
                 "Close the interface? Training continues in the background and its "
                 "complete output is available in the saved log file.", parent=self.root):
+            return
+        if active_comparison and not messagebox.askyesno(
+                "Model comparison still running",
+                "Close the interface? The comparison continues in the background. "
+                "Progress and partial results remain in its run folder.", parent=self.root):
+            return
+        if active_tuning and not messagebox.askyesno(
+                "Hyperparameter tuning is active",
+                "Close Studio? The native tuner continues in the background and its "
+                "trial results can be reopened later.", parent=self.root):
             return
         if active_audit and not messagebox.askyesno(
                 "Audit is running", "Cancel the audit safely and close the application?",

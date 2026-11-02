@@ -34,7 +34,9 @@ def _build_model_filename(version, size):
 
     versions = {
         "8": "yolov8", "v8": "yolov8", "yolov8": "yolov8",
+        "10": "yolov10", "v10": "yolov10", "yolov10": "yolov10",
         "11": "yolo11", "v11": "yolo11", "yolo11": "yolo11",
+        "12": "yolo12", "v12": "yolo12", "yolo12": "yolo12",
         "26": "yolo26", "v26": "yolo26", "yolo26": "yolo26",
     }
     if version_key not in versions:
@@ -57,6 +59,7 @@ def _normalize_device_choice(device):
 
 
 from augmentation_options import validate_augmentation, edit_augmentation
+from training_yaml_import import parse_training_yaml, validate_training_overrides
 
 
 def _validate_cls_weight(value):
@@ -1430,9 +1433,25 @@ def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
         row=8, column=0, columnspan=3, sticky="w", pady=10)
 
     # Only show the training settings when training is selected.
-    ttk.Label(train_tab, text="Training configuration",
+    yaml_header = ttk.Frame(train_tab)
+    yaml_header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+    yaml_header.columnconfigure(0, weight=1)
+    ttk.Label(yaml_header, text="Training configuration",
               font=("Segoe UI", 12, "bold")).grid(
-        row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+    ttk.Label(yaml_header, text="Import Ultralytics args.yaml / best_hyperparameters.yaml").grid(
+        row=1, column=0, sticky="w", pady=(0, 5))
+    yaml_source = tk.StringVar()
+    yaml_status = tk.StringVar(value="Optional · imports advanced train settings, not old model/dataset/output paths")
+    imported_advanced = {}
+    ttk.Entry(yaml_header, textvariable=yaml_source, state="readonly").grid(
+        row=2, column=0, sticky="ew", padx=(0, 10))
+    ttk.Button(yaml_header, text="Browse / import…",
+               command=lambda: browse_training_yaml()).grid(row=2, column=1, padx=(0, 6))
+    ttk.Button(yaml_header, text="Remove import",
+               command=lambda: clear_training_yaml()).grid(row=2, column=2)
+    ttk.Label(yaml_header, textvariable=yaml_status, foreground="#555555",
+              wraplength=700).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     def field(label, row):
         ttk.Label(train_tab, text=label).grid(row=row, column=0,
@@ -1568,6 +1587,89 @@ def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
         root, augmentation, apply_augmentation)).grid(row=20, column=0, sticky="w", pady=(12, 6))
     ttk.Label(train_tab, textvariable=augmentation_summary).grid(
         row=20, column=1, columnspan=2, sticky="w", padx=(8, 0))
+
+    def _training_yaml_preview(info):
+        """Inspect the exact imported settings before altering the form."""
+        import json
+        dialog = tk.Toplevel(root)
+        dialog.title("Import Ultralytics training parameters")
+        dialog.transient(root)
+        dialog.geometry("700x540")
+        dialog.minsize(540, 360)
+        content = ttk.Frame(dialog, padding=16)
+        content.pack(fill="both", expand=True)
+        ttk.Label(content, text="Review training YAML import",
+                  font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(content, text="Model, dataset, run name and output folder stay under GUI control.",
+                  foreground="#555555").pack(anchor="w", pady=(4, 9))
+        from tkinter.scrolledtext import ScrolledText
+        details = ScrolledText(content, wrap="word", height=18, font=("Consolas", 9))
+        details.pack(fill="both", expand=True)
+        groups = [
+            ("Visible fields (applied to GUI)", info["visible"]),
+            ("Augmentation parameters", info["augmentation"]),
+            ("Advanced model.train() settings", info["advanced"]),
+            ("Ignored / protected args.yaml fields", info["skipped"]),
+        ]
+        details.insert("end", "Source: " + info["source"] + "\n\n")
+        for title, settings in groups:
+            details.insert("end", f"{title} ({len(settings)}):\n")
+            details.insert("end", (json.dumps(settings, indent=2, ensure_ascii=False)
+                                   if settings else "(none)") + "\n\n")
+        details.configure(state="disabled")
+        actions = ttk.Frame(content)
+        actions.pack(fill="x", pady=(12, 0))
+
+        def apply_import():
+            ui = info["visible"]
+            if "time" in ui:
+                duration_mode.set("Hours")
+                duration.set(str(ui["time"]))
+            elif "epochs" in ui:
+                duration_mode.set("Epochs")
+                duration.set(str(ui["epochs"]))
+            for key, var in (("batch", batch), ("imgsz", imgsz),
+                             ("workers", workers), ("cache", cache),
+                             ("cls", cls_weight)):
+                if key in ui:
+                    var.set(str(ui[key]))
+            if "device" in ui:
+                device.set(choices[ui["device"]])
+            apply_augmentation(info["augmentation"])
+            imported_advanced.clear()
+            imported_advanced.update(info["advanced"])
+            yaml_source.set(info["source"])
+            yaml_status.set(
+                f"Imported: {len(ui)} GUI, {len(info['augmentation'])} augmentation, "
+                f"{len(imported_advanced)} advanced settings. "
+                f"{len(info['skipped'])} ignored/protected; settings in the GUI may be edited.")
+            dialog.destroy()
+
+        ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side="right")
+        ttk.Button(actions, text="Apply settings", command=apply_import).pack(
+            side="right", padx=(0, 8))
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.grab_set()
+        return dialog
+
+    def browse_training_yaml():
+        selected = filedialog.askopenfilename(
+            parent=root, title="Import Ultralytics training arguments",
+            filetypes=[("Ultralytics YAML", "*.yaml *.yml"), ("All files", "*.*")],
+        )
+        if not selected:
+            return
+        try:
+            info = parse_training_yaml(selected)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Invalid training YAML", str(exc), parent=root)
+            return
+        _training_yaml_preview(info)
+
+    def clear_training_yaml():
+        yaml_source.set("")
+        imported_advanced.clear()
+        yaml_status.set("Import cleared. Current visible fields and augmentation selections remain editable.")
 
     # 3. Pre-Annotate: independent of the selected split/training workflow.
     preannotate_page.columnconfigure(0, weight=1)
@@ -1790,6 +1892,7 @@ def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
                     "cleanup_disk_cache": cleanup_disk_cache.get(),
                     "cls_weight": selected_cls_weight,
                     "augmentation": validate_augmentation(augmentation),
+                    "training_overrides": validate_training_overrides(imported_advanced),
                     "device": next(k for k, v in choices.items() if v == device.get()),
                     "auto_install_cuda": cuda_install.get(),
                     "project": project_path, "run_name": run_name.get().strip() or "train",
@@ -1955,6 +2058,7 @@ def autosplit_and_train_model(
     project=None, run_name="train", compact_progress=True, cls_weight=0.5,
     existing_data_yaml=None, cache="disk", workers=8,
     cleanup_disk_cache=True, cache_cleanup_manifest=None, augmentation=None,
+    training_overrides=None,
 ):
     """Create YOLO split lists, split and train, or train an existing split.
 
@@ -1984,6 +2088,7 @@ def autosplit_and_train_model(
         if train_after_split and len(weights) == 3 and weights[1] <= 0:
             raise ValueError("Training requires a validation split above zero.")
     augmentation = validate_augmentation(augmentation)
+    training_overrides = validate_training_overrides(training_overrides)
     if train_after_split:
         batch = int(batch)
         imgsz = int(imgsz)
@@ -2082,8 +2187,11 @@ def autosplit_and_train_model(
         "cache": False if cache == "off" else cache, "workers": workers,
     }
     kwargs.update(augmentation)
+    kwargs.update(training_overrides)
     if augmentation:
         print(f"Augmentation overrides: {augmentation}")
+    if training_overrides:
+        print(f"Imported advanced training parameters: {training_overrides}")
     if time is not None:
         kwargs["time"] = time
     else:
