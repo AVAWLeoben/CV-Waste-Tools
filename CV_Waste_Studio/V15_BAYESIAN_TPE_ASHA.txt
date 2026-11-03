@@ -1,0 +1,66 @@
+CV WASTE STUDIO v15 — OPTIONAL BAYESIAN TPE + ASHA HYPERPARAMETER TUNING
+========================================================================
+
+06 Hyperparameter Tuning now offers two search engines:
+
+  • Native genetic evolution (existing default; unchanged)
+  • Bayesian TPE + ASHA via Ultralytics YOLO.tune(use_ray=True),
+    Ray Tune OptunaSearch and Ray's ASHAScheduler.
+
+The selected Conda Python is probed once when the tool panel initializes.
+The probe verifies the installed versions, Ray Tune's Optuna searcher,
+ASHA scheduler, Ultralytics tuning arguments, and the Ray epoch callback.
+
+If unsupported, Bayesian mode is disabled. The dialog provides a suggested
+pip command to copy. It DOES NOT install anything automatically. You can
+continue using native tuning and select 'Check compatibility' afterward.
+
+Suggested optional installation in the same Conda environment:
+  python -m pip install "ray[tune]>=2.41.0" "optuna>=3" "pydantic>=2,<2.12"
+
+If the current Ultralytics lacks Ray support, upgrading Ultralytics may be
+necessary. Review your Conda environment / pinned PyTorch CUDA packages
+before upgrading. The GUI provides a command using your actual interpreter.
+
+BAYESIAN SEARCH
+---------------
+Set model/weights, data.yaml, image size (any valid model image size),
+training budgets, workers, cache and optimizer as before. Set 'ASHA min
+epochs' (must be 1..epochs per trial). For CUDA training, Ray reserves 1 GPU
+per trial, so on a single RTX 5090 trials run sequentially instead of
+competing for VRAM. The ASHA scheduler may stop weak trials early.
+
+SEARCH SPACE FROM EITHER TUNER
+------------------------------
+Click 'Import best YAML…' in section 03, select a native or Ray-produced
+best_hyperparameters.yaml, and choose a percentage search width (default
+±30%). Each supported numeric tuned value becomes a MIN/MAX search range
+clipped to the supported parameter domain. Values not supported by the
+editable search grid are ignored. The same resulting ranges can be used by
+both engines. Importing does not automatically alter the model, data.yaml,
+image size, or run output path. Review bounds before starting a new search.
+
+RESULTS
+-------
+Ray per-trial results (result.json or progress.csv) are displayed in the
+existing four interactive charts and trial table. The table also shows
+recorded epochs and early-stopped/finished trial status where available.
+The worker exports a best_hyperparameters.yaml compatible with the native
+tuning output and the normal Studio training YAML importer. A source JSON
+file records the best trial / score. Ray checkpoints remain under their
+own trial-specific output folders; no checkpoint is fabricated.
+
+Ray searches can be opened after completion. Native evolution's existing
+Resume / extend behaviour remains intact; Ray Resume / extend is intentionally
+disabled because safe extension requires restoring Ray's experiment state.
+
+SAFEGUARDS
+----------
+All Ray/CUDA imports occur in child workers, not the main GUI. Ray runs in
+the selected Conda Python. Python entry points use the Windows __main__
+guard, and KMP_DUPLICATE_LIB_OK is confined to workers. The Stop button
+terminates the worker tree. Existing disk image cache cleanup is retained.
+
+Ray Tune / Optuna / CUDA training was NOT exercised on the target PC here;
+first test a small run (e.g. 3 trials x 5 epochs) after the compatibility
+check. Results depend on the installed Ultralytics/Ray versions.

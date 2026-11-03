@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from hyperparameter_tuning import PRESETS, RANGES, best_trial, create_run_name, read_trials, validate_settings
+from ray_tune_support import read_ray_trials, INSTALL_PACKAGES
 from tuning_charts import TuningCharts
 
 ACCENT = '#405DE6'
@@ -26,9 +27,14 @@ class HyperparameterTuningPanel(tk.Frame):
         self.job=None
         self.folder=None
         self.trials=[]
-        self._last_ndjson_size=-1
+        self._last_ndjson_size=None
         self._selected_trial=None
+        self.current_engine='native'
+        self.ray_available=False
+        self.ray_probe=None
+        self.ray_report=None
         self._build()
+        self.after(600, self.check_ray_compatibility)
 
     @property
     def busy(self):
@@ -45,7 +51,7 @@ class HyperparameterTuningPanel(tk.Frame):
         main.pack(fill='both',expand=True)
         heading=ttk.Frame(main)
         heading.pack(fill='x',pady=(0,8))
-        ttk.Label(heading,text='Native YOLO hyperparameter tuning',font=('Segoe UI',14,'bold')).pack(side='left')
+        ttk.Label(heading,text='YOLO hyperparameter tuning',font=('Segoe UI',14,'bold')).pack(side='left')
         ttk.Button(heading,text='Open previous run',command=self.open_previous).pack(side='right')
         self.resume_btn=ttk.Button(heading,text='Resume / extend',command=self.resume_previous,state='disabled')
         self.resume_btn.pack(side='right',padx=(0,8))
@@ -58,6 +64,25 @@ class HyperparameterTuningPanel(tk.Frame):
         ttk.Label(main,textvariable=self.status,style='Muted.TLabel').pack(fill='x',pady=(0,9))
         self.setup=ttk.Frame(main)
         self.setup.pack(fill='both',expand=True)
+        # Search engine stays visible at the top of the setup page.
+        engines=ttk.Frame(self.setup)
+        engines.pack(fill='x',pady=(0,7))
+        ttk.Label(engines,text='Search engine:',font=('Segoe UI',9,'bold')).pack(side='left',padx=(0,10))
+        self.engine=tk.StringVar(value='native')
+        ttk.Radiobutton(engines,text='Native genetic evolution',variable=self.engine,
+                        value='native',command=self._update_engine).pack(side='left',padx=(0,12))
+        self.ray_radio=ttk.Radiobutton(engines,text='Bayesian TPE + ASHA',variable=self.engine,
+                       value='ray',state='disabled',command=self._update_engine)
+        self.ray_radio.pack(side='left',padx=(0,10))
+        ttk.Button(engines,text='Check compatibility',command=self.check_ray_compatibility).pack(side='right')
+        ray_settings=ttk.Frame(self.setup)
+        ray_settings.pack(fill='x',pady=(0,5))
+        self.compat_label=tk.StringVar(value='Ray availability: checking selected Conda Python…')
+        ttk.Label(ray_settings,textvariable=self.compat_label,style='Muted.TLabel',
+                  wraplength=640).pack(side='left',fill='x',expand=True)
+        self.grace=tk.StringVar(value='10')
+        self.grace_label=ttk.Label(ray_settings,text='ASHA min epochs:')
+        self.grace_entry=ttk.Entry(ray_settings,textvariable=self.grace,width=5)
         canvas=tk.Canvas(self.setup,highlightthickness=0,bd=0,bg='white')
         scroll=ttk.Scrollbar(self.setup,orient='vertical',command=canvas.yview)
         canvas.configure(yscrollcommand=scroll.set)
@@ -125,7 +150,7 @@ class HyperparameterTuningPanel(tk.Frame):
             ttk.Combobox(body,textvariable=var,values=choices,state='readonly',width=17).grid(
                 row=row,column=1,sticky='w',pady=4)
         ttk.Label(body,text='Each trial retrains independently using the native Ultralytics tuner; '
-                  'cache=off avoids .npy files and excessive shared RAM on Windows; disk cache is automatically cleaned after tuning.',
+                  'cache=off avoids .npy files and excessive shared RAM on Windows; disk cache is cleaned after tuning.',
                   style='Muted.TLabel',wraplength=660).grid(row=14,column=1,columnspan=2,sticky='w',pady=(4,8))
         ttk.Separator(body).grid(row=15,column=0,columnspan=3,sticky='ew',pady=10)
         ttk.Label(body,text='03  Search space',font=('Segoe UI',12,'bold')).grid(row=16,column=0,columnspan=3,sticky='w',pady=(0,8))
@@ -135,8 +160,13 @@ class HyperparameterTuningPanel(tk.Frame):
         ttk.Combobox(picks,textvariable=self.preset,values=tuple(PRESETS),state='readonly',width=20).pack(
             side='left',padx=(10,12))
         ttk.Button(picks,text='Apply preset',command=self.apply_preset).pack(side='left')
+        ttk.Button(picks,text='Import best YAML…',command=self.import_best_yaml).pack(side='left',padx=(14,5))
+        ttk.Label(picks,text='±').pack(side='left')
+        self.search_width=tk.StringVar(value='30')
+        ttk.Entry(picks,textvariable=self.search_width,width=4).pack(side='left',padx=(2,2))
+        ttk.Label(picks,text='% search width').pack(side='left')
         ttk.Label(body,text='Check parameters to tune; adjust bounds (must stay within native search limits). '
-                  'Full native uses the installed Ultralytics default search space.',
+                  'Full native uses the selected engine’s default search space.',
                   style='Muted.TLabel',wraplength=725).grid(row=18,column=0,columnspan=3,sticky='w',pady=(0,5))
         table=ttk.Frame(body)
         table.grid(row=19,column=0,columnspan=3,sticky='w',pady=(0,12))
@@ -162,7 +192,7 @@ class HyperparameterTuningPanel(tk.Frame):
         ttk.Label(body,text='Each run gets its own folder with best_hyperparameters.yaml, '
                   'best.pt, native tune figures and full trial history.',style='Muted.TLabel',
                   wraplength=680).grid(row=24,column=1,columnspan=2,sticky='w',pady=(0,10))
-        self.start_btn=ttk.Button(body,text='Start native hyperparameter tuning',style='Accent.TButton',command=self.start)
+        self.start_btn=ttk.Button(body,text='Start hyperparameter tuning',style='Accent.TButton',command=self.start)
         self.start_btn.grid(row=25,column=2,sticky='e',pady=8)
 
         self.monitor=ttk.Frame(main)
@@ -207,11 +237,12 @@ class HyperparameterTuningPanel(tk.Frame):
         self.charts.pack(fill='both',expand=True)
         lower=ttk.Frame(self.monitor)
         lower.pack(fill='both',expand=True,pady=(7,0))
-        cols=('trial','fitness','map50','map5095','precision','recall','parameters')
+        cols=('trial','fitness','map50','map5095','precision','recall','epochs','status','parameters')
         self.table=ttk.Treeview(lower,columns=cols,show='headings',height=4)
         titles={'trial':('Trial',52),'fitness':('Fitness',77),'map50':('mAP50',80),
                 'map5095':('mAP50–95',87),'precision':('Precision',82),
-                'recall':('Recall',82),'parameters':('Tuned hyperparameters',420)}
+                'recall':('Recall',82),'epochs':('Ep.',53),'status':('Status',88),
+                'parameters':('Tuned hyperparameters',340)}
         for key,(label,width) in titles.items():
             self.table.heading(key,text=label)
             self.table.column(key,width=width,stretch=key=='parameters',anchor='w')
@@ -226,6 +257,7 @@ class HyperparameterTuningPanel(tk.Frame):
         self._log_visible=False
         self._log.configure(state='disabled')
         self.in_setup=True
+        self._update_engine()
 
     def _file(self,var,title,filetypes):
         selected=filedialog.askopenfilename(parent=self,title=title,filetypes=filetypes)
@@ -236,9 +268,135 @@ class HyperparameterTuningPanel(tk.Frame):
         if selected:var.set(selected)
 
     def apply_preset(self):
-        keys=set(PRESETS[self.preset.get()])
+        keys=set(PRESETS.get(self.preset.get(), ()))
         for key,(enabled,_,_) in self.space_widgets.items():
             enabled.set(key in keys)
+
+    def _update_engine(self):
+        ray = self.engine.get() == 'ray'
+        if ray and not self.ray_available:
+            self.engine.set('native')
+            ray = False
+        if ray:
+            self.grace_entry.pack(side='right',padx=(5,0))
+            self.grace_label.pack(side='right')
+        else:
+            self.grace_label.pack_forget()
+            self.grace_entry.pack_forget()
+        self.start_btn.configure(text='Start Bayesian TPE + ASHA' if ray else 'Start native genetic tuning')
+
+    def check_ray_compatibility(self):
+        """Probe via the selected Conda interpreter, not Studio's Python.
+
+        This never imports torch/ray into the Tk process and never installs
+        packages without explicit user action.
+        """
+        if self.ray_probe is not None and self.ray_probe.poll() is None:
+            return
+        self.compat_label.set('Checking Ray + Optuna + Ultralytics in selected Conda environment…')
+        self.ray_radio.configure(state='disabled')
+        self.ray_available=False
+        self.engine.set('native')
+        self._update_engine()
+        try:
+            flags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0
+            env=self.process_env()
+            env.setdefault('KMP_DUPLICATE_LIB_OK','TRUE')
+            self.ray_probe=subprocess.Popen(
+                [str(self.env_python()), '-u', str(Path(__file__).with_name('probe_ray_tune.py'))],
+                cwd=str(Path(__file__).parent), env=env,
+                stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                creationflags=flags)
+            self.after(250,self._finish_ray_probe)
+        except (OSError,ValueError) as exc:
+            self._ray_unavailable(str(exc))
+
+    def _finish_ray_probe(self):
+        if self.ray_probe is None:return
+        if self.ray_probe.poll() is None:
+            self.after(250,self._finish_ray_probe)
+            return
+        out,err=self.ray_probe.communicate()
+        self.ray_probe=None
+        try:
+            report=json.loads(out.decode('utf-8','replace').strip().splitlines()[-1])
+            if not isinstance(report,dict):raise ValueError('Invalid probe result')
+        except (ValueError,IndexError) as exc:
+            report={'available':False,'reason':err.decode('utf-8','replace')[-800:] or str(exc)}
+        self.ray_report=report
+        if report.get('available'):
+            self.ray_available=True
+            self.ray_radio.configure(state='normal')
+            versions=report.get('versions',{})
+            self.compat_label.set('Ray ready · Ultralytics '+versions.get('ultralytics','?')+
+                 ' · Ray '+versions.get('ray','?')+' · Optuna '+versions.get('optuna','?'))
+        else:
+            self._ray_unavailable(report.get('reason','Unknown compatibility problem'))
+
+    def _ray_unavailable(self,reason):
+        self.ray_available=False
+        self.ray_radio.configure(state='disabled')
+        self.engine.set('native')
+        self._update_engine()
+        self.compat_label.set('Bayesian mode unavailable · '+str(reason)[:170])
+        python=str(self.env_python())
+        extra=' -U ultralytics' if 'ultralytics' in str(reason).lower() else ''
+        command=f'"{python}" -m pip install{extra} "ray[tune]>=2.41.0" "optuna>=3" "pydantic>=2,<2.12"'
+        if messagebox.askyesno('Bayesian TPE + ASHA unavailable',
+            'The selected Conda Python cannot use Ray Tune.\n\n'+str(reason)[:400]+
+            '\n\nSuggested command (in a terminal):\n'+command+
+            '\n\nCopy this command to the clipboard?\n\n'+
+            'Choose No to continue with native tuning; Bayesian mode stays disabled.',parent=self):
+            self.clipboard_clear()
+            self.clipboard_append(command)
+            self._logline('Copied optional install command for selected Conda environment.')
+
+    def import_best_yaml(self):
+        """Create editable search ranges around values from either tuner."""
+        import yaml
+        path=filedialog.askopenfilename(parent=self,title='Import best hyperparameters',
+                        filetypes=[('Ultralytics YAML','*.yaml *.yml')])
+        if not path:return
+        try:
+            width=float(self.search_width.get().strip().replace(',','.'))/100.0
+            if not 0 < width <= 2:
+                raise ValueError('Search width must be >0 and <=200 percent.')
+            values=yaml.safe_load(Path(path).read_text(encoding='utf-8-sig'))
+            if not isinstance(values,dict):
+                raise ValueError('YAML must contain a mapping of hyperparameters.')
+            if 'hyperparameters' in values and isinstance(values['hyperparameters'],dict):
+                values=values['hyperparameters']
+            updates={}
+            for k,v in values.items():
+                if k not in RANGES:continue
+                if isinstance(v,bool):continue
+                try: center=float(v)
+                except (TypeError,ValueError):continue
+                from math import isfinite
+                lo,hi=RANGES[k]
+                if not isfinite(center) or not lo<=center<=hi:
+                    continue
+                radius=max(abs(center)*width,(hi-lo)*0.015)
+                left=max(lo,center-radius)
+                right=min(hi,center+radius)
+                if left>=right:continue
+                updates[k]=(left,right)
+            if not updates:
+                raise ValueError('No supported numeric tuning values within allowed bounds found.')
+            for k,(enabled,low,high) in self.space_widgets.items():
+                enabled.set(k in updates)
+                if k in updates:
+                    lo,hi=updates[k]
+                    low.set(f'{lo:.7g}')
+                    high.set(f'{hi:.7g}')
+            self.preset.set('Custom (YAML)')
+            self._logline(f'Imported {len(updates)} editable search ranges from {path}; width ±{width*100:g}%.')
+            messagebox.showinfo('Search ranges imported',
+                 f'Created {len(updates)} editable search intervals around saved values.\n'
+                 'These are ranges, not fixed values. Review the bounds before tuning.\n'
+                 'The same ranges work with native and Bayesian modes.',parent=self)
+        except (OSError,ValueError,yaml.YAMLError) as exc:
+            messagebox.showerror('Could not import tuning YAML',str(exc),parent=self)
 
     def settings(self):
         space={}
@@ -250,7 +408,8 @@ class HyperparameterTuningPanel(tk.Frame):
             'name':self.name.get(),'iterations':self.iterations.get(),
             'epochs':self.epochs.get(),'batch':self.batch.get(),'imgsz':self.imgsz.get(),
             'workers':self.workers.get(),'cache':self.cache.get(),'optimizer':self.optimizer.get(),
-            'device':self.device.get(),'space':space if space else None})
+            'device':self.device.get(),'space':space if space else None,
+            'engine':self.engine.get(),'grace_period':self.grace.get()})
 
     def _mode(self,setup):
         self.setup.pack_forget()
@@ -314,9 +473,10 @@ class HyperparameterTuningPanel(tk.Frame):
                                stdin=subprocess.DEVNULL,stdout=out,stderr=subprocess.STDOUT,
                                creationflags=flags,start_new_session=os.name!='nt')
         self.folder=folder
-        self.job={'process':p,'file':file,'offset':0,'pending':'','target':settings['iterations'],'stopping':False}
+        self.job={'process':p,'file':file,'offset':0,'pending':'','target':settings['iterations'],
+                  'epochs':settings['epochs'],'stopping':False}
         self.trials=[]
-        self._last_ndjson_size=-1
+        self._last_ndjson_size=None
         self.charts.update_trials([])
         self.progress.configure(value=0)
         self.epoch_progress.configure(value=0)
@@ -325,9 +485,10 @@ class HyperparameterTuningPanel(tk.Frame):
         self.stop_btn.configure(state='normal')
         self.resume_btn.configure(state='disabled')
         self.start_btn.configure(state='disabled')
-        self.status.set('Tuning running · native Ultralytics trials')
+        self.current_engine=settings.get('engine', 'native')
+        self.status.set('Tuning running · '+('Ray Optuna TPE + ASHA' if self.current_engine=='ray' else 'native Ultralytics evolution'))
         self.headline.set('Tuning · loading dataset and starting trial 1')
-        self._logline('Native tuning launched · '+str(folder))
+        self._logline(('Bayesian TPE + ASHA' if self.current_engine=='ray' else 'Native evolution')+' tuning launched · '+str(folder))
         self._mode(False)
 
     def stop(self):
@@ -349,12 +510,17 @@ class HyperparameterTuningPanel(tk.Frame):
 
     def _refresh_trials(self):
         if not self.folder:return
-        ndjson=self.folder/'tune_results.ndjson'
-        try:size=ndjson.stat().st_size
-        except OSError:size=-1
+        if self.current_engine == 'ray':
+            # Ray appends per-trial epoch records rather than native NDJSON.
+            paths=list(self.folder.glob('**/result.json')) or list(self.folder.glob('**/progress.csv'))
+            size=(len(paths), sum(p.stat().st_size for p in paths if p.is_file()))
+        else:
+            ndjson=self.folder/'tune_results.ndjson'
+            try:size=ndjson.stat().st_size
+            except OSError:size=-1
         if size==self._last_ndjson_size:return
         self._last_ndjson_size=size
-        self.trials=read_trials(self.folder)
+        self.trials=(read_ray_trials(self.folder) if self.current_engine=='ray' else read_trials(self.folder))
         self.charts.update_trials(self.trials)
         self.table.delete(*self.table.get_children())
         for r in self.trials:
@@ -368,12 +534,22 @@ class HyperparameterTuningPanel(tk.Frame):
             self.table.insert('','end',iid=str(r['iteration']),values=(
                 r['iteration'],f"{r['fitness']:.5f}" if not r['failed'] else 'Failed',
                 metric('metrics/mAP50(B)'),metric('metrics/mAP50-95(B)'),
-                metric('metrics/precision(B)'),metric('metrics/recall(B)'),hp))
+                metric('metrics/precision(B)'),metric('metrics/recall(B)'),
+                r.get('epochs','—') if self.current_engine=='ray' else '—',
+                r.get('status','—') if self.current_engine=='ray' else 'Finished',hp))
         best=best_trial(self.trials)
         count=len(self.trials)
         target=self.job['target'] if self.job else max(count,1)
         self.progress.configure(value=min(100,100*count/max(1,target)))
-        self.trial_status.set(f'{count} / {target} trials completed · {100*count/max(1,target):.0f}%')
+        word='started/recorded' if self.current_engine=='ray' else 'completed'
+        self.trial_status.set(f'{count} / {target} trials {word} · {100*count/max(1,target):.0f}%')
+        if self.current_engine=='ray' and self.trials:
+            row=self.trials[-1]
+            ep=int(row.get('epochs',0))
+            epochs=int(self.job.get('epochs',0)) if self.job else int(self.epochs.get() or 1)
+            if epochs>0:
+                self.epoch_progress.configure(value=100*min(ep,epochs)/epochs)
+                self.epoch_status.set(f"Ray trial {row['trial_id']} · epoch {ep}/{epochs}")
         if best:
             self.best_label.set(f"BEST  ·  Trial {best['iteration']}  ·  Fitness {best['fitness']:.5f}")
             metrics=best['metrics']
@@ -448,26 +624,38 @@ class HyperparameterTuningPanel(tk.Frame):
                 self.job=None
                 self.start_btn.configure(state='normal')
                 self.stop_btn.configure(state='disabled')
-                self.resume_btn.configure(state='normal' if self._saved_run_settings() else 'disabled')
+                self.resume_btn.configure(state='normal' if self.current_engine=='native' and self._saved_run_settings() else 'disabled')
                 self._logline('Tuning log: '+str(job['file']))
         except OSError as exc:
             self._logline('Tuning log read error: '+str(exc))
 
     def load_folder(self,folder):
         folder=Path(folder)
-        if not folder.is_dir() or not (folder/'tune_results.ndjson').is_file():
-            raise ValueError('This folder has no native Ultralytics tune_results.ndjson')
+        if not folder.is_dir():
+            raise ValueError('Selected tuning folder does not exist.')
+        saved=self._settings_for_folder(folder)
+        engine=(saved or {}).get('engine','native')
+        if engine=='ray' or any(folder.glob('**/result.json')) or any(folder.glob('**/progress.csv')):
+            self.current_engine='ray'
+        elif (folder/'tune_results.ndjson').is_file():
+            self.current_engine='native'
+        else:
+            raise ValueError('No Ultralytics native or Ray Tune trial results found.')
         self.folder=folder
-        self._last_ndjson_size=-1
+        self._last_ndjson_size=None
         self._refresh_trials()
         self.status.set(f'Previous tuning run loaded · {folder.name}')
-        self.resume_btn.configure(state='normal' if self._saved_run_settings() else 'disabled')
+        self.resume_btn.configure(state='normal' if self.current_engine=='native' and self._saved_run_settings() else 'disabled')
         self._mode(False)
 
     def _saved_run_settings(self):
         if not self.folder:return None
-        candidates=(self.folder.parent/(self.folder.name+'.studio_tuning_settings.json'),
-                    self.folder/'studio_tuning_settings.json')
+        return self._settings_for_folder(self.folder)
+
+    @staticmethod
+    def _settings_for_folder(folder):
+        candidates=(folder.parent/(folder.name+'.studio_tuning_settings.json'),
+                    folder/'studio_tuning_settings.json')
         for path in candidates:
             if path.is_file():
                 try:
@@ -479,6 +667,9 @@ class HyperparameterTuningPanel(tk.Frame):
 
     def resume_previous(self):
         if self.busy:return
+        if self.current_engine!='native':
+            messagebox.showinfo('Ray resume', 'Open Ray results for review. Extending Ray searches is not enabled in this version.', parent=self)
+            return
         if self.can_start and not self.can_start():
             messagebox.showwarning('GPU job active','Finish the active GPU job first.',parent=self)
             return
@@ -550,6 +741,12 @@ class HyperparameterTuningPanel(tk.Frame):
     def copy_best_checkpoint(self):
         if not self.folder:return
         path=self.folder/'weights'/'best.pt'
+        if self.current_engine=='ray' and (self.folder/'studio_ray_best.json').is_file():
+            record=json.loads((self.folder/'studio_ray_best.json').read_text(encoding='utf-8'))
+            ray_path=Path(record.get('trial_path',''))
+            if ray_path.is_dir():
+                candidate=next(ray_path.glob('**/weights/best.pt'),None)
+                if candidate is not None:path=candidate
         if not path.is_file():
             messagebox.showinfo('Not available yet',
                 'Ultralytics saves the best checkpoint in weights/best.pt after a successful trial.',parent=self)

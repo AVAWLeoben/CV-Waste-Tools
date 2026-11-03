@@ -95,7 +95,16 @@ def validate_settings(config):
                 raise ValueError(f'{key}: bounds must satisfy {limit_lo} <= min < max <= {limit_hi}.')
             normalized[key] = (lo, hi)
         space = normalized
+    engine = str(config.get('engine', 'native')).strip().lower()
+    if engine not in ('native', 'ray'):
+        raise ValueError('Tuning mode must be native or ray.')
+    grace_period = _int(config.get('grace_period', 10), 'ASHA grace period', 1, 1000)
+    if engine == 'ray' and grace_period > epochs:
+        raise ValueError('ASHA grace period must not exceed epochs per trial.')
     resume = bool(config.get('resume', False))
+    if resume and engine == 'ray':
+        # Ray restore requires a compatible existing Ray experiment state.
+        raise ValueError('Use Open previous run to review Ray results; resume is only supported in native mode.')
     if resume and not name:
         raise ValueError('To resume, select a named run folder.')
     if resume and not (output / name / 'tune_results.ndjson').is_file():
@@ -105,7 +114,8 @@ def validate_settings(config):
         'name': name, 'epochs': epochs, 'iterations': trials, 'batch': batch,
         'imgsz': imgsz, 'workers': workers, 'cache': cache,
         'optimizer': optimizer, 'device': _normalize_device_choice(config.get('device', 'auto')),
-        'space': space, 'resume': resume,
+        'space': space, 'resume': resume, 'engine': engine,
+        'grace_period': grace_period,
     }
 
 
@@ -121,6 +131,12 @@ def tune_arguments(settings, run_name):
          'save': True, 'val': True, 'device': settings['device']}
     if settings['space'] is not None:
         d['space'] = settings['space']
+    if settings.get('engine') == 'ray':
+        d.pop('resume', None)
+        d['use_ray'] = True
+        d['search_alg'] = 'optuna'
+        d['grace_period'] = settings['grace_period']
+        d['gpu_per_trial'] = 0 if d['device'] == 'cpu' else 1
     return d
 
 
@@ -187,9 +203,10 @@ def run_native_tuning(settings):
     # Only select existing folder with explicit resume; no overwrite of old runs.
     # Leave the destination absent: Ultralytics get_save_dir() otherwise
     # silently increments the name and the GUI would monitor the wrong folder.
+    engine = settings.get('engine', 'native')
     args = tune_arguments(settings, name)
     print('STUDIO_TUNE_FOLDER ' + str(folder), flush=True)
-    print(f"Native Ultralytics model.tune(): {settings['iterations']} trials, "
+    print(f"{'Ray Optuna TPE + ASHA' if engine == 'ray' else 'Native Ultralytics'} model.tune(): {settings['iterations']} trials, "
           f"{settings['epochs']} epochs/trial, workers={settings['workers']}, "
           f"cache={settings['cache']}", flush=True)
     # Native tuner spawns individual train processes; no parallel custom trainers.
@@ -214,8 +231,36 @@ def run_native_tuning(settings):
         manifest = root / (name + '_disk_cache_manifest.json')
         _save_disk_cache_manifest(manifest, pending_caches)
     try:
-        model.tune(use_ray=False, **args)
+        if engine == 'ray':
+            from ray_tune_support import ray_space, export_ray_best, dependency_report
+            status = dependency_report()
+            if not status['available']:
+                raise RuntimeError('Ray/Optuna tuner unavailable: ' + status['reason'])
+            if args.get('device') == 'cpu':
+                args['gpu_per_trial'] = 0
+            else:
+                args['gpu_per_trial'] = 1
+            # Native Ray distributions are not serializable in the settings JSON.
+            # Convert bounds only inside this subprocess, never in the GUI.
+            if 'space' in args:
+                args['space'] = ray_space(args['space'])
+            # Ultralytics Ray integration expects an unoccupied tune directory.
+            result = model.tune(**args)
+            search_keys = tuple(settings['space'] or RANGES)
+            best = export_ray_best(folder, result, search_keys, settings['epochs'])
+            if best is None:
+                raise RuntimeError('Ray finished without a successful trial with supported hyperparameters.')
+        else:
+            model.tune(use_ray=False, **args)
     finally:
+        if engine == 'ray':
+            # Also release Ray when the native integration throws before shutdown.
+            try:
+                import ray
+                if getattr(ray, "is_initialized", lambda: False)():
+                    ray.shutdown()
+            except (ImportError, RuntimeError):
+                pass
         if pending_caches:
             from train_and_split_tool_GUI import _remove_new_disk_cache
             _remove_new_disk_cache(pending_caches, manifest)
@@ -223,10 +268,15 @@ def run_native_tuning(settings):
             manifest.unlink(missing_ok=True)
     (folder / 'studio_tuning_settings.json').write_text(
         json.dumps(settings, indent=2), encoding='utf-8')
-    trials = read_trials(folder)
+    if engine == 'ray':
+        from ray_tune_support import read_ray_trials
+        trials = read_ray_trials(folder)
+    else:
+        trials = read_trials(folder)
     winner = best_trial(trials)
-    if winner is None:
+    if winner is None and engine != 'ray':
         raise RuntimeError('No successful tuning trial was recorded. Review the worker log.')
     print('STUDIO_TUNE_COMPLETE ' + str(folder), flush=True)
-    print(f"Best trial {winner['iteration']} · fitness {winner['fitness']:.5f}", flush=True)
+    if winner is not None:
+        print(f"Best trial {winner['iteration']} · fitness {winner['fitness']:.5f}", flush=True)
     return folder

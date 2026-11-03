@@ -1,3 +1,9 @@
+CV WASTE STUDIO v15 — BAYESIAN TPE + ASHA (OPTIONAL)
+=============================================================
+Section 06 also offers Ray Tune Optuna TPE + ASHA with Conda compatibility
+checks, dependency guidance, and import of either tuner's best YAML as a
+new editable search space. See V15_BAYESIAN_TPE_ASHA.txt.
+
 CV WASTE STUDIO v12 — HYPERPARAMETER TUNING
 =================================================
 New: 06 Hyperparameter tuning with native Ultralytics YOLO.tune(), editable
