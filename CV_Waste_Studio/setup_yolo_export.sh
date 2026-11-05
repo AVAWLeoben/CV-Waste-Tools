@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# AVAW LiteRT WSL setup. Always uses Python 3.11, never Python 3.14.
+# AVAW LiteRT WSL setup. Prefer Python 3.11 for new installs.
+# Preserve existing working Python 3.11 or 3.12 environments.
 ENV_DIR="$HOME/yolo_export"
-PY_REQUIRED='3.11'
+PY_PREFERRED='3.11'
 UV_BIN="$HOME/.local/bin/uv"
 
 fail() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
@@ -11,7 +12,7 @@ trap 'printf "Setup failed at line %s (exit code %s).\n" "$LINENO" "$?" >&2' ERR
 
 python_ok() {
     [[ -x "$ENV_DIR/bin/python" ]] && \
-        "$ENV_DIR/bin/python" -c 'import sys; sys.exit(sys.version_info[:2] != (3, 11))' >/dev/null 2>&1
+        "$ENV_DIR/bin/python" -c 'import sys; sys.exit(sys.version_info[:2] not in ((3, 11), (3, 12)))' >/dev/null 2>&1
 }
 
 # Print the *actual* cause of a failed import or package-version check.
@@ -27,9 +28,7 @@ from importlib.metadata import PackageNotFoundError, version
 checks = [
     ("pip", "pip"),
     ("torch", "torch"),
-    ("torchvision", "torchvision"),
     ("ultralytics", "ultralytics"),
-    ("tensorflow", "tensorflow"),
     ("litert_torch", "litert_torch"),
 ]
 failed = False
@@ -57,7 +56,7 @@ PY
 }
 
 # Fast launch check: query package metadata without importing PyTorch or
-# TensorFlow. Only perform the full, slower import validation after a repair.
+# optional packages. Only perform the full import validation after a repair.
 check_packages_fast() {
     "$ENV_DIR/bin/python" - <<'PYFAST'
 from importlib.metadata import PackageNotFoundError, version
@@ -66,8 +65,7 @@ import re
 import sys
 
 required = (
-    'pip', 'torch', 'torchvision', 'ultralytics', 'tensorflow',
-    'litert-torch', 'ai-edge-litert',
+    'torch', 'ultralytics', 'litert-torch', 'ai-edge-litert',
 )
 minimums = {'litert-torch': (0, 9), 'ai-edge-litert': (2, 1)}
 for package in required:
@@ -85,7 +83,7 @@ if importlib.util.find_spec('pip') is None:
 PYFAST
 }
 
-echo "Checking LiteRT environment: $ENV_DIR (Python $PY_REQUIRED)"
+echo "Checking LiteRT environment: $ENV_DIR (Python 3.11 or 3.12)"
 if python_ok; then
     if check_packages_fast; then
         echo 'LiteRT export environment is ready (quick check passed).'
@@ -93,7 +91,7 @@ if python_ok; then
     fi
     echo 'A dependency is missing or incompatible. Repairing environment...'
 else
-    echo 'Python 3.11 environment is missing or incompatible.'
+    echo 'Compatible Python 3.11/3.12 environment is missing or incompatible.'
 fi
 
 if [[ ! -x "$UV_BIN" ]]; then
@@ -112,22 +110,22 @@ if [[ ! -x "$UV_BIN" ]]; then
 fi
 
 if ! python_ok; then
-    echo "Installing managed Python $PY_REQUIRED (does not modify system Python)..."
-    "$UV_BIN" python install "$PY_REQUIRED"
+    echo "Installing managed Python $PY_PREFERRED (does not modify system Python)..."
+    "$UV_BIN" python install "$PY_PREFERRED"
     if [[ -e "$ENV_DIR" ]]; then
         echo "Replacing incompatible or incomplete environment: $ENV_DIR"
         rm -rf -- "$ENV_DIR"
     fi
-    "$UV_BIN" venv --python "$PY_REQUIRED" --managed-python "$ENV_DIR"
+    "$UV_BIN" venv --python "$PY_PREFERRED" --managed-python "$ENV_DIR"
 fi
-python_ok || fail 'Failed to create a Python 3.11 environment.'
+python_ok || fail 'Failed to create a compatible Python environment.'
 
 # uv venvs may not include pip. Ultralytics uses `python -m pip` when
 # attempting to install export dependencies, so install pip explicitly.
 echo 'Installing or repairing LiteRT packages...'
 "$UV_BIN" pip install --python "$ENV_DIR/bin/python" \
     'pip>=24' \
-    torch torchvision ultralytics tensorflow \
+    torch torchvision ultralytics \
     'ai-edge-litert>=2.1.4' \
     'litert-torch>=0.9.0'
 

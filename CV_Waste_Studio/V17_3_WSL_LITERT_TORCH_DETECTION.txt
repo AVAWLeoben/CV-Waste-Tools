@@ -1,0 +1,39 @@
+CV Waste Studio v17.3 — WSL LiteRT compatibility correction
+==========================================================
+
+Why the v17.2 check failed
+-------------------------
+The WSL2 probe incorrectly listed TensorFlow as a required package.
+Ultralytics 8.4.174 supports format="litert" through litert_torch, as
+confirmed by an actual successful Windows/WSL export using Python 3.12.15,
+PyTorch 2.13.0+cu130 and litert_torch 0.9.4. A separate tensorflow package
+is not needed for that export path.
+
+Changes
+-------
+* WSL probe requires torch, ultralytics and litert-torch, not tensorflow.
+* WSL probe retains diagnostics for nonessential optional dependencies.
+* setup_yolo_export.sh accepts existing Python 3.11 OR 3.12 installations;
+  new installations continue to prefer Python 3.11.
+* setup_yolo_export.sh no longer installs TensorFlow solely for LiteRT.
+* Model Export's installation prompt explains that it preserves working
+  environments and does not install TensorFlow.
+* Duplicate Ubuntu prefixes in diagnostic activity logs are suppressed.
+* No training or model export engine changes.
+
+Installation
+------------
+For v17.2, extract the small patch into the parent folder containing
+CV_Waste_Studio, overwriting the listed files. Back up the originals first.
+Alternatively, extract the complete v17.3 ZIP over a backed-up installation.
+
+Then open CV Waste Studio → 07 Model Export → Recheck environment.
+A working WSL2 LiteRT-Torch environment should display as ready, without
+asking to install TensorFlow. Do not run a dependency repair if your own
+LiteRT export works already.
+
+Testing
+-------
+154 tests + 42 subtests passed under a virtual X11 desktop; Python syntax
+and bash -n checks passed. Actual Windows/WSL execution of v17.3 has not
+been tested here; it must be confirmed on the user's computer.

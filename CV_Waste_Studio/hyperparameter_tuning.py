@@ -102,13 +102,39 @@ def validate_settings(config):
     if engine == 'ray' and grace_period > epochs:
         raise ValueError('ASHA grace period must not exceed epochs per trial.')
     resume = bool(config.get('resume', False))
-    if resume and engine == 'ray':
-        # Ray restore requires a compatible existing Ray experiment state.
-        raise ValueError('Use Open previous run to review Ray results; resume is only supported in native mode.')
     if resume and not name:
         raise ValueError('To resume, select a named run folder.')
-    if resume and not (output / name / 'tune_results.ndjson').is_file():
-        raise ValueError('Selected run has no tune_results.ndjson to resume.')
+    if resume:
+        from tuning_refinement import saved_settings, ray_has_state
+        folder = output / name
+        saved = saved_settings(folder)
+        if saved is None and engine == 'ray':
+            raise ValueError('Original Studio/Ray settings missing; a YAML alone cannot resume search history.')
+        if saved is not None and saved.get('engine', 'native') != engine:
+            raise ValueError('Resuming requires the original tuning algorithm.')
+        if engine == 'ray':
+            if not ray_has_state(folder):
+                raise ValueError('Ray Tune experiment state missing; use Refine for a new run.')
+        elif not (folder / 'tune_results.ndjson').is_file():
+            raise ValueError('Selected run has no tune_results.ndjson to resume.')
+        # A genuine resume must not silently change its dataset, architecture,
+        # resources, optimizer, or original hyperparameter search bounds.
+        unchanged = ('model', 'data', 'epochs', 'imgsz', 'batch', 'workers',
+                     'cache', 'optimizer', 'device', 'space', 'grace_period')
+        for field in unchanged:
+            if saved is not None and field in saved and field in config:
+                value = config[field]
+                if field == 'space' and value is not None:
+                    value = {k: tuple(map(float, v)) for k, v in value.items()}
+                old_value = saved[field]
+                if field == 'space' and old_value is not None:
+                    old_value = {k: tuple(map(float, v)) for k, v in old_value.items()}
+                if field in ('model', 'data'):
+                    value, old_value = str(value), str(old_value)
+                if value != old_value:
+                    raise ValueError(f'Resume cannot change {field}; start a new refinement run instead.')
+        if engine == 'ray' and 'iterations' in saved and trials != int(saved['iterations']):
+            raise ValueError('Ray restores unfinished trials only. To request additional trials, start a new refinement run.')
     return {
         'data': str(dataset['yaml']), 'model': model, 'output_dir': str(output),
         'name': name, 'epochs': epochs, 'iterations': trials, 'batch': batch,
@@ -132,7 +158,8 @@ def tune_arguments(settings, run_name):
     if settings['space'] is not None:
         d['space'] = settings['space']
     if settings.get('engine') == 'ray':
-        d.pop('resume', None)
+        if not settings['resume']:
+            d.pop('resume', None)
         d['use_ray'] = True
         d['search_alg'] = 'optuna'
         d['grace_period'] = settings['grace_period']
@@ -236,6 +263,12 @@ def run_native_tuning(settings):
             status = dependency_report()
             if not status['available']:
                 raise RuntimeError('Ray/Optuna tuner unavailable: ' + status['reason'])
+            if settings['resume']:
+                # Ray's restore implementation must be present in the selected
+                # environment. Do NOT create a new run if original state is gone.
+                from ray import tune
+                if not tune.Tuner.can_restore(str(folder)):
+                    raise RuntimeError('Ray cannot restore this experiment. Original tuning state is missing or incompatible.')
             if args.get('device') == 'cpu':
                 args['gpu_per_trial'] = 0
             else:
@@ -244,6 +277,11 @@ def run_native_tuning(settings):
             # Convert bounds only inside this subprocess, never in the GUI.
             if 'space' in args:
                 args['space'] = ray_space(args['space'])
+            elif settings['resume']:
+                # Some Ultralytics Ray versions dereference space even when
+                # restoring a Tune experiment. The original searcher state is
+                # authoritative on restore; this only satisfies API setup.
+                args['space'] = ray_space(RANGES)
             # Ultralytics Ray integration expects an unoccupied tune directory.
             result = model.tune(**args)
             search_keys = tuple(settings['space'] or RANGES)

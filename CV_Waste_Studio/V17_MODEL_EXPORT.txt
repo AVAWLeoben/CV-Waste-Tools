@@ -1,0 +1,50 @@
+CV Waste Studio v17 — Model Export
+================================
+
+New section 07 Model Export:
+  * Exports trained .pt weights via native Ultralytics YOLO.export().
+  * Formats: ONNX, TensorRT Engine, LiteRT (.tflite).
+  * Image sizes: square (e.g. 640) or rectangular (e.g. 640x1088),
+    passed as (height, width) to Ultralytics; Ultralytics may round to stride.
+  * Export options: precision FP32/FP16/INT8 when supported; batch,
+    dynamic shapes, simplified ONNX, embedded NMS, optional opset,
+    TensorRT workspace, calibration data.yaml and calibration fraction.
+  * INT8 is refused without a real calibration YAML to avoid silently
+    calibrating a custom detector against an unrelated default dataset.
+  * Results saved in a new dated folder under logs/exports by default,
+    with export_summary.json and the converted artifact.
+  * Worker: run_model_export.py, launched in the managed Conda Python with
+    explicit __main__ entry point. The original .pt is never modified.
+  * Progress is indeterminate during conversion (Ultralytics does not expose
+    reliable per-layer completion percentages). Logs and status are live.
+  * Stop export, Open Results Folder, and exact log locations included.
+
+Dependency checks:
+  * Probe runs in the chosen managed Conda interpreter, not system Python.
+  * ONNX requires Ultralytics to advertise ONNX export.
+  * TensorRT requires PyTorch CUDA GPU and importable full TensorRT Builder.
+    If missing, Studio asks when the Export section is first opened whether
+    to install it into the selected environment, or leaves Engine disabled.
+    TensorRT pip install is optional and requires explicit user consent.
+    Package chosen from torch.version.cuda: tensorrt-cu12 or tensorrt-cu13.
+    The install runs in a separate process and is probed again afterward.
+  * LiteRT is enabled only on Linux x86_64 (CV-Waste Everywhere use).
+    The runtime may require additional exporter dependencies on first export.
+    For older Ultralytics with a 'tflite' export argument, the equivalent
+    legacy exporter is used to create the same .tflite deployment format.
+  * Engine files are hardware- and TensorRT-runtime-specific. Export on the
+    deployment machine or one with a matching GPU and TRT configuration.
+
+Notes:
+  * TensorRT and LiteRT require optional packages not installed by default.
+  * TensorRT installation can affect your Conda environment. Check NVIDIA
+    driver/CUDA compatibility before accepting, and use environment backups.
+  * A successful export is not proof of identical inference performance.
+    Validate the exported model on your deployment platform.
+  * Existing training, audit, recall, comparisons and tuning are unchanged.
+
+References:
+  https://docs.ultralytics.com/modes/export/
+  https://docs.ultralytics.com/integrations/tensorrt/
+  https://docs.ultralytics.com/integrations/litert/
+  https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/install-pip.html

@@ -1,0 +1,44 @@
+CV Waste Studio v17.2 - WSL2 LiteRT probe and setup prompt fix
+===============================================================
+
+Problem
+-------
+The v17.1 Model Export page could offer to reinstall the WSL environment
+when LiteRT export had already worked via the existing BAT/WSL script.
+The probe checked only the first registered distribution and treated
+optional Python package metadata failures as a reason to disable LiteRT.
+Its UI also automatically presented the setup prompt on opening Model Export.
+
+Changes
+-------
+- Inspect all registered WSL distributions and use a usable exporter even
+  when it is not in the default/first distribution.
+- Check the actual Ultralytics LiteRT/TFLite export format and core packages
+  in ~/yolo_export/bin/python. Optional package metadata is reported as a
+  warning, not treated as conclusive evidence that export cannot work.
+- Report the exact failure reason and per-distribution results in the
+  Model Export activity log.
+- Never automatically prompt to install WSL LiteRT dependencies when the
+  Model Export page is opened. Recheck environment remains read-only.
+- WSL status / setup... is an explicit operator action. Probe errors show
+  diagnostics instead of immediately offering installation. An installation
+  offer appears only on explicit request when an environment/package is
+  confirmed missing.
+- Leave the existing Linux environment, Windows Conda and export worker
+  unchanged; no package installation or repair is done by this update.
+
+Quick checks
+------------
+1. Replace the v17.1 files, restart CV Waste Studio.
+2. Open 07 Model Export and click Recheck environment.
+3. Check the Model Export activity log for "WSL LiteRT" and the selected
+   distribution. On a ready environment, LiteRT will be enabled.
+4. If disabled, click WSL status / setup... to read the diagnostic. Do not
+   reinstall until the reason is understood. Share the log for diagnosis.
+
+Tested
+------
+143 automated tests passed under a virtual X desktop, including existing
+training/evaluation/export tests, second-distribution selection, optional
+package metadata and no automatic install popup. No real Windows/WSL
+export conversion was run in this test environment.

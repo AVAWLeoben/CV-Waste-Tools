@@ -200,3 +200,7 @@ Recall@Precision (v10.3): select Class-agnostic NMS to pass agnostic_nms=True to
 Ultralytics prediction. Enabling it requires a separate prediction cache.
 After a successful evaluation, click Open Results Folder to open the exact
 saved precision_recall_* results directory in the system file manager.
+
+
+v16 addition: See V16_REFINE_CONTINUE_HPT.txt for refining an earlier
+Bayesian/native HPT search or resuming the original experiment state.

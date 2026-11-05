@@ -1,0 +1,46 @@
+CV WASTE STUDIO v17.4 - ON-DEMAND BAYESIAN DEPENDENCY CHECK / INSTALL
+===================================================================
+
+WHY IT CHANGED
+--------------
+The optional Ray/Optuna check no longer runs when the Studio GUI starts.
+
+OPEN 06 HYPERPARAMETER TUNING
+-----------------------------
+The first visit to the HPT section probes Ray Tune, Optuna and the current
+Ultralytics integration in the selected Conda Python via probe_ray_tune.py.
+Visits after the first do not repeat the check unless the selected Python
+changes. You can click "Check compatibility" to force a new check.
+
+IF BAYESIAN DEPENDENCIES ARE MISSING
+------------------------------------
+A dialog offers to install Ray Tune, Optuna and the compatible Pydantic
+version into the selected Conda environment. Installation never starts
+without explicitly clicking Yes. The exact selected Python executable is
+shown. The script calls that Python's pip directly, without modifying the
+system Python or spawning a different GUI.
+
+The installation runs asynchronously so Studio remains responsive. A full
+persistent log is saved under the application's logs/ folder as
+hpt_ray_install_YYYYMMDD_HHMMSS_ffffff.log. The HPT page displays the
+installation state, and the activity log displays a concise extract.
+
+On success, the same Conda Python is probed again. If the feature checks
+pass, Bayesian TPE + ASHA is enabled without a restart. If the installation
+fails or Ray remains incompatible, Bayesian stays disabled; native tuning
+remains usable. There is no repeated install prompt after an automatic
+recheck. Manual "Install Ray / Optuna..." and "Check compatibility" controls
+remain available for troubleshooting.
+
+SAFETY
+------
+The pip installation may change packages inside the selected Conda
+environment, including Pydantic. It is never automatic without consent.
+Installing while another Studio GPU job is running is blocked. If you close
+Studio during the install, it warns that the subprocess may continue.
+
+TESTING
+-------
+The regression suite and simulated subprocess install/probe tests pass.
+Installation into the user's real Windows or Linux Conda environment was
+not executed as part of this package.

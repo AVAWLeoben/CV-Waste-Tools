@@ -1,0 +1,88 @@
+CV Waste Studio v17.1 — LiteRT on Windows through WSL2
+====================================================
+
+Windows LiteRT export no longer requires switching to a separate BAT menu.
+07 Model Export supports ONNX and TensorRT natively in the selected Conda
+Python, plus LiteRT through a separate Linux Python 3.11 environment in WSL2.
+Native LiteRT on Linux x86-64 is unchanged.
+
+SETUP (Windows)
+---------------
+1. Open 07 Model Export. Studio checks WSL2 and the Linux export environment
+   in the background. If WSL2 is missing, LiteRT is disabled and the
+   'WSL / LiteRT setup...' button opens an installation guide.
+2. Open PowerShell AS ADMINISTRATOR and run: wsl --install -d Ubuntu
+   Restart Windows if prompted. Start Ubuntu once to set up the Linux user.
+   If an existing distribution is WSL1, switch it with:
+      wsl --set-version Ubuntu 2
+3. Return to Studio and select 'Recheck environment'.
+4. Select 'WSL / LiteRT setup...' again and approve environment setup. Studio
+   runs the supplied setup_yolo_export.sh under WSL2; it creates/repairs
+   ~/yolo_export with Python 3.11, PyTorch, TensorFlow, Ultralytics, LiteRT,
+   etc. It may download several gigabytes. It does NOT install in Windows
+   Conda or modify Windows Python. Logs go to Studio's logs/ directory.
+5. Recheck. 'LiteRT' becomes selectable when the WSL environment is ready.
+6. Choose a locally available .pt model, image size (square or HxW),
+   precision, batch and destination, then click Export model.
+7. Output: dated Windows-accessible directory under logs/exports/ containing
+   the .tflite model and export_summary.json. Open Results Folder works.
+
+Unlike WSL setup, the act of installing WSL2 requires Windows administrator
+rights and may need a reboot and BIOS virtualization. The app guides you and
+provides the commands but never silently elevates or installs OS features.
+
+WHAT THE BRIDGE DOES
+--------------------
+* Runs a read-only WSL availability check and verifies the Linux Python 3.11
+  environment and Ultralytics export format before enabling LiteRT.
+* Copies the selected checkpoint into the export job folder. Your original
+  model is not modified; the private copy is removed on normal completion or
+  error. Unclean termination may leave a staged copy.
+* Uses wslpath to translate Windows paths, including paths containing spaces.
+* Launches the native Ultralytics YOLO.export(format='litert') in WSL, not a
+  separate training/inference implementation.
+* Saves .tflite output and the export summary back on the Windows drive.
+* Can request cancellation of the specific Linux exporter process; it does
+  not call 'wsl --shutdown', so other WSL work is not intentionally stopped.
+
+LIMITATIONS / SAFETY
+--------------------
+* WSL2 Linux x86-64 required. ARM64 Windows + ARM64 WSL is not supported by
+  this workflow. TensorRT export remains a separate native Windows process.
+* The WSL export environment is managed separately from Windows Conda. Studio
+  checks and repairs it only after explicit user confirmation.
+* The supplied setup script may require sudo for missing Linux OS packages.
+  If unattended setup fails, open Ubuntu and run
+      cd /mnt/c/path/to/CV_Waste_Studio
+      bash setup_yolo_export.sh
+  interactively; check logs/export_wsl_setup_*.log for errors.
+* INT8 calibration YAML must be readable through WSL and have paths reachable
+  from Linux. Windows drive paths inside data.yaml are rejected with a clear
+  message. Convert these entries to /mnt/c/... paths or use relative paths
+  before requesting INT8 export. FP32 does not require a dataset YAML.
+* 'LiteRT FP16' isn't a separate export mode in current Ultralytics. Keep FP32
+  or INT8, depending on the export/runtime version.
+* Windows WSL and real Ultralytics conversion should be verified on your PC.
+  The provided tests simulate WSL command handling and exporter calls.
+
+SOURCES
+-------
+Microsoft WSL installation: https://learn.microsoft.com/en-us/windows/wsl/install
+Microsoft WSL commands:      https://learn.microsoft.com/en-us/windows/wsl/basic-commands
+Ultralytics LiteRT:         https://docs.ultralytics.com/integrations/litert/
+
+FILES ADDED
+-----------
+  wsl_litert.py                 Read-only WSL environment probe, process bridge
+  wsl_litert_export_worker.py   WSL-only native YOLO.export invocation
+  setup_yolo_export.sh         Your supplied Python 3.11 / LiteRT setup script
+  tests/test_wsl_litert.py     Regression tests for the bridge
+
+FILES UPDATED
+-------------
+  model_export.py              Windows WSL2 availability and backend selection
+  model_export_ui.py           WSL setup guide and export integration
+  run_model_export.py          Dispatches Windows LiteRT requests into WSL2
+  tests/test_model_export_ui.py   Additional Windows LiteRT GUI tests
+
+Other CV Waste Studio functionality and UI pages are unchanged.

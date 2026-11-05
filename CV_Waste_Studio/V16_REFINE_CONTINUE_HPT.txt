@@ -1,0 +1,69 @@
+CV WASTE STUDIO v16 — REFINE / CONTINUE AN HPT EXPERIMENT
+=======================================================
+
+This update builds on v15. Training, model comparison, recall evaluation,
+pre-annotation, environment setup, and launchers are not modified.
+
+06 HYPERPARAMETER TUNING — NEW ACTIONS
+--------------------------------------
+1) "Refine previous HPT folder..."
+   Pick a native or Ray tuning results folder containing
+   best_hyperparameters.yaml (or readable saved trial history).
+   Studio proposes an editable, smaller search space around the best saved
+   numeric hyperparameters. The +/- percentage is editable, default 30%.
+   Rate-like parameters (lr0/weight_decay) use multiplicative intervals.
+   Parameters close to earlier search bounds are highlighted in amber;
+   such parameters may need *wider*, not narrower, exploration.
+   The original folder and tuning state are not modified. A distinct
+   <old_name>_refined_<time> run name is suggested.
+   If the original Studio settings JSON is available, Studio offers to use
+   the old architecture, dataset, image size and resource settings for a
+   fair comparison. This does not change the selected tuning algorithm:
+   you can refine Ray results with native genetic tuning or vice versa.
+
+2) "Import best YAML..."
+   Works with best_hyperparameters.yaml copied from either engine, including
+   a standalone YAML from another machine or an older run. Generates the
+   same editable range proposal. This is NOT a true tuner-state resume.
+   Paths or model names embedded in untrusted YAML are not applied.
+
+3) "Use previous .pt weights..."
+   Optionally use a trial's best.pt/last.pt as the starting *model* for a
+   NEW tuning search. This changes the pretrained weights used by the next
+   trials, NOT the tuner search history. Use the original pretrained weights
+   instead for comparable coarse-to-fine hyperparameter studies.
+
+4) "Continue saved HPT..."
+   Choose the original, complete tuning run folder. A best YAML or .pt
+   checkpoint alone is NOT enough to resume a genetic or Bayesian study.
+   The original Studio settings JSON, architecture, dataset, optimiser,
+   image size and search space are required.
+
+   Native: requires tune_results.ndjson and original Studio settings.
+   You can resume interrupted trials or increase the TOTAL iterations to
+   extend the genetic study. Old tuning records remain in place.
+
+   Ray: requires recoverable tuner.pkl + experiment_state*.json and original
+   Studio settings. This resumes unfinished Ray trials only; it does not
+   increase the original number of trials. The selected Conda environment
+   must pass the existing Ray compatibility check. A second can_restore()
+   check runs in the worker before calling model.tune(resume=True).
+   To add more Ray trials, create a *new* refinement study instead.
+
+5) Resume logs are created with unique timestamps, so previously generated
+   tuning worker logs are not overwritten by another continuation attempt.
+
+BOUNDARY WARNING
+----------------
+If the previous Studio search space is saved, boundary checks use those
+bounds. Otherwise checks refer to the GUI's supported global ranges and may
+not represent the actual historical space. The suggested bounds always stay
+within the current supported tuning limits. Review them before starting.
+
+IMPORTANT
+---------
+- Tuning results remain validation-set measurements; reserve test for final.
+- A completed trial's best.pt is a model checkpoint, not an evolutionary or
+  Ray Tune optimiser checkpoint.
+- Real Windows/CUDA/Ray resume should be verified in the selected Conda env.
+- Restart Studio after replacing files; keep a backup of the previous code.
