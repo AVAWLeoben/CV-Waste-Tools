@@ -1,0 +1,107 @@
+# CV-Waste-Tools: generated files, training data, and local environments.
+# Existing ignore entries are retained below for compatibility.
+
+# -----------------------------------------------------------------------------
+# Existing rules (preserved exactly)
+# -----------------------------------------------------------------------------
+# Ignore log directory
+CV-Waste-Tools/logs/
+CV-Waste-Tools/audit_logs/
+CV_Waste-Tools/precision_recall_test_logs/
+CV_Waste-Tools/__pycache__/
+
+# Ignore Python cache directories
+__pycache__/
+
+# Ignore all PNG files
+*.png
+
+# Exception: allow CV Waste Studio branding assets
+!CV_Waste_Studio/assets/*.png
+!CV_Waste_Studio/assets/*.ico
+
+# Ignore all .log files
+*.log
+*.tflite
+*.pt
+*.csv
+*.json
+*.npz
+*.pyc
+*.lnk
+
+# -----------------------------------------------------------------------------
+# Log directories from both CV_Waste_Studio and CV_Waste_Studio_Legacy
+# (Names above don't match the actual folder names in this repo.)
+# -----------------------------------------------------------------------------
+logs/
+audit_logs/
+precision_recall_test_logs/
+
+# -----------------------------------------------------------------------------
+# Python virtual environments, caches, build outputs, test artifacts
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+*.pyo
+*.pyd
+*.whl
+
+# -----------------------------------------------------------------------------
+# YOLO / Ultralytics / machine-learning outputs and datasets
+# -----------------------------------------------------------------------------
+runs/
+wandb/
+mlruns/
+lightning_logs/
+tensorboard/
+checkpoints/
+weights/
+datasets/
+
+# Additional binary models and exported formats
+*.onnx
+*.engine
+*.torchscript
+*.safetensors
+*.h5
+*.hdf5
+*.keras
+*.pb
+*.pth
+*.ckpt
+*.npy
+*.tflite.zip
+
+# -----------------------------------------------------------------------------
+# Local configuration, credentials, editors, and OS files
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.sample
+*.local
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Locally generated repository tree listing
+/tree.txt
