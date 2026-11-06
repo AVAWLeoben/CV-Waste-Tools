@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="CV_Waste_Studio/assets/cv_waste_studio_128.png" width="112" alt="CV Waste Studio logo">
+  <img src="https://github.com/AVAWLeoben/CV-Waste-Tools/blob/b763ed31e1203009e2bbc1a6eb8f0adad1f974ba/CV_Waste_Studio/assets/cv_waste_studio.ico" width="112" alt="CV Waste Studio logo">
 </p>
 
 <h1 align="center">CV Waste Studio</h1>
