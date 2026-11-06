@@ -360,6 +360,8 @@ class Studio:
             self.export_panel.on_show()
         if key == "tuning" and self.tuning_panel is not None:
             self.tuning_panel.on_show()
+        if key == "recall" and self.recall_gui is not None:
+            self.recall_gui._refresh_runtime_hint()
         self._apply_workspace_layout()
         name, detail = PAGE_TEXT[key]
         self.title.configure(text="Training monitor" if self._monitoring() else name)

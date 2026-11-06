@@ -23,17 +23,157 @@ import sys
 import tempfile
 import time
 import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+# The inference worker may use a lean SenSoRTC Python without Tk installed.
+# GUI modules are only required when opening the Studio interface.
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+except ImportError:
+    tk = filedialog = messagebox = ttk = None
 import traceback
 
 from recall_report import load_evaluation, saved_evaluations, save_evaluation_report, REPORT_NAME
+from export_environment import load_selection, make_export_process_env, save_selection
+from model_export import parse_image_size
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 CONF_FLOOR = 0.01
 CACHE_VERSION = 2
+MODEL_EXTENSIONS = {".pt", ".engine", ".onnx"}
+RECALL_EVENT_PREFIX = "STUDIO_RECALL_EVENT="
+
+
+def engine_export_settings(model_path: str | Path) -> dict:
+    """Read optional Studio export metadata; never require it for external engines."""
+    model = Path(model_path)
+    if model.suffix.lower() != ".engine":
+        return {}
+    summary_file = model.parent / "export_summary.json"
+    try:
+        summary = json.loads(summary_file.read_text(encoding="utf-8"))
+        if Path(str(summary.get("exported_model", ""))).resolve() != model.resolve():
+            return {}
+        values = summary.get("settings", {})
+        return values if isinstance(values, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def evaluation_runtime(settings: dict) -> str:
+    """Engine evaluations use the saved Model Export interpreter, not Studio's Python."""
+    if Path(settings["model"]).suffix.lower() == ".engine":
+        return str(settings.get("evaluation_python") or load_selection() or sys.executable)
+    return sys.executable
+
+
+def validate_engine_input_settings(settings: dict) -> None:
+    """Avoid mismatching static TensorRT engine image and batch dimensions."""
+    if Path(settings["model"]).suffix.lower() != ".engine":
+        return
+    if str(settings.get("device", "Auto")) == "CPU":
+        raise ValueError("TensorRT .engine inference needs an NVIDIA GPU. Set device to Auto or GPU 0.")
+    metadata = engine_export_settings(settings["model"])
+    if not metadata or metadata.get("dynamic", False):
+        return
+    declared_size = metadata.get("imgsz")
+    if declared_size is not None:
+        expected = parse_image_size(declared_size)
+        actual = parse_image_size(settings["imgsz"])
+        if actual != expected:
+            raise ValueError(f"This static TensorRT engine was exported at imgsz={expected}; "
+                             f"set the evaluation image size to {expected}.")
+    declared_batch = metadata.get("batch")
+    if declared_batch is not None and int(settings["batch"]) != int(declared_batch):
+        raise ValueError(f"This static TensorRT engine was exported with batch={declared_batch}; "
+                         f"set evaluation batch to {declared_batch}.")
+
+
+def run_engine_evaluation(settings: dict, emit, *, cancel_event=None):
+    """Stream Recall@Precision from the selected TensorRT Python in a safe subprocess.
+
+    In particular, never import a potentially incompatible native libnvinfer
+    into Studio's Tk process or install packages in SenSoRTC's interpreter.
+    """
+    python = Path(evaluation_runtime(settings)).expanduser()
+    if not python.is_file():
+        raise ValueError(f"Selected Model Export Python does not exist: {python}. "
+                         "Choose the SenSoRTC runtime in 07 Model Export, then retry.")
+    validate_engine_input_settings(settings)
+    worker = Path(__file__).with_name("run_recall_evaluation.py")
+    env = make_export_process_env(os.environ, str(python), sys.executable)
+    emit("log", f"TensorRT evaluation Python: {python}")
+    emit("log", "Ultralytics auto-installation disabled; evaluating the exported .engine directly.")
+    with tempfile.TemporaryDirectory(prefix="cvw_recall_engine_") as td:
+        req = Path(td) / "settings.json"
+        cancel_file = Path(td) / "cancel.request"
+        req.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
+        stop_monitor = threading.Event()
+        def forward_stop():
+            while not stop_monitor.wait(0.15):
+                if cancel_event is not None and cancel_event.is_set():
+                    cancel_file.touch()
+                    return
+        watcher = threading.Thread(target=forward_stop, name="RecallEngineStopMonitor", daemon=True)
+        watcher.start()
+        cmd = [str(python), "-u", str(worker), str(req), "--cancel-file", str(cancel_file)]
+        try:
+            process = subprocess.Popen(cmd, cwd=str(worker.parent), env=env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                       text=True, encoding="utf-8", errors="replace", bufsize=1)
+        except OSError:
+            stop_monitor.set()
+            watcher.join(timeout=0.5)
+            raise
+        result = None
+        error = None
+        cancelled = False
+        trailing = []
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                if cancel_event is not None and cancel_event.is_set() and not cancel_file.exists():
+                    cancel_file.touch()
+                line = line.rstrip("\r\n")
+                if line.startswith(RECALL_EVENT_PREFIX):
+                    try:
+                        event = json.loads(line[len(RECALL_EVENT_PREFIX):])
+                        kind, value = event.get("kind"), event.get("value")
+                        if kind == "done":
+                            result = value
+                        elif kind == "error":
+                            error = str(value)
+                        elif kind == "cancelled":
+                            cancelled = True
+                        elif kind in {"status", "log"}:
+                            emit(kind, value)
+                    except (ValueError, TypeError) as exc:
+                        emit("log", f"Malformed Recall worker event: {exc}")
+                elif line:
+                    trailing.append(line)
+                    trailing = trailing[-30:]
+                    emit("log", line)
+            exit_code = process.wait()
+            if (cancel_event is not None and cancel_event.is_set()) or cancelled:
+                raise EvaluationCancelled("Recall@Precision evaluation stopped by user.")
+            if exit_code != 0 or error is not None or result is None:
+                detail = error or "\n".join(trailing[-12:]) or "Worker produced no completion result"
+                raise RuntimeError(f"TensorRT evaluation failed (exit {exit_code}): {detail}")
+            emit("done", result)
+            return result
+        finally:
+            stop_monitor.set()
+            watcher.join(timeout=0.5)
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            if process.stdout is not None:
+                process.stdout.close()
 
 
 class EvaluationCancelled(Exception):
@@ -229,6 +369,9 @@ def _cache_identity(settings: dict, images: list[Path]) -> str:
     # Retain the old cache key when disabled, so previous inference caches still work.
     if settings.get("agnostic_nms", False):
         identity["agnostic_nms"] = True
+    if model.suffix.lower() == ".engine":
+        # Different TensorRT runtimes may produce slightly different outputs.
+        identity["evaluation_python"] = _normal_path(evaluation_runtime(settings))
     h.update(json.dumps(identity, sort_keys=True).encode("utf-8"))
     for image in images:
         stat = image.stat()
@@ -306,6 +449,16 @@ def predict_and_cache(settings: dict, images: list[Path], cache_path: Path,
     _check_cancelled(cancel_event)
     inference_started = time.perf_counter()
     device = choose_device(settings["device"], emit)
+    engine_version = None
+    if Path(settings["model"]).suffix.lower() == ".engine":
+        try:
+            import tensorrt as trt
+            engine_version = str(getattr(trt, "__version__", "unknown"))
+            emit("log", f"TensorRT inference runtime: {engine_version} | Python: {sys.executable}")
+        except Exception as exc:
+            raise RuntimeError("The selected Python cannot import TensorRT for .engine inference. "
+                               "Select SenSoRTC's verified Python environment in Model Export. "
+                               f"Details: {exc}") from exc
     emit("status", "Loading model and running batched inference ...")
     model = YOLO(settings["model"])
     names = _names_dict(model.names)
@@ -384,6 +537,8 @@ def predict_and_cache(settings: dict, images: list[Path], cache_path: Path,
         "agnostic_nms": settings.get("agnostic_nms", False),
         "max_det": settings["max_det"],
         "inference_seconds": round(time.perf_counter() - inference_started, 3),
+        "inference_python": sys.executable,
+        "tensorrt_version": engine_version,
     }
     tmp_json = meta_path.with_suffix(meta_path.suffix + ".tmp")
     try:
@@ -531,6 +686,8 @@ def evaluate(settings: dict, emit, *, cache_only: bool = False, cancel_event=Non
     analysis_started = time.perf_counter()
     _check_cancelled(cancel_event)
     model_file = Path(settings["model"])
+    if model_file.suffix.lower() not in MODEL_EXTENSIONS:
+        raise ValueError("Choose an Ultralytics .pt, .engine or .onnx model.")
     if not model_file.is_file():
         raise ValueError(f"Model file does not exist: {model_file}")
     dest = Path(settings["output"])
@@ -605,6 +762,8 @@ def evaluate(settings: dict, emit, *, cache_only: bool = False, cancel_event=Non
         "food_ground_truth_count": curve["gt_count"],
         "food_prediction_count_at_floor": curve["prediction_count_food"],
         "prediction_device": meta.get("device"),
+        "prediction_python": meta.get("inference_python"),
+        "prediction_tensorrt_version": meta.get("tensorrt_version"),
         "initial_inference_seconds": meta.get("inference_seconds"),
         "evaluation_seconds": round(time.perf_counter() - analysis_started, 3),
         "used_cached_predictions": used_cache,
@@ -675,6 +834,7 @@ class RecallTestGUI:
         self.recent_paths = []
         self.recent_var = tk.StringVar()
         self.model_var = tk.StringVar()
+        self.engine_runtime_var = tk.StringVar(value="")
         self.mode_var = tk.StringVar(value="Dataset YAML")
         self.source_var = tk.StringVar()
         self.split_var = tk.StringVar(value="test")
@@ -694,6 +854,8 @@ class RecallTestGUI:
         self.result_var = tk.StringVar(value="No evaluation run yet.")
         self.inputs = []
         self._build_ui()
+        self.model_var.trace_add("write", lambda *_: self._refresh_runtime_hint())
+        self._refresh_runtime_hint()
         if not self.embedded:
             self.root.protocol("WM_DELETE_WINDOW", self._close_standalone)
         root.after(150, self._poll)
@@ -725,7 +887,7 @@ class RecallTestGUI:
                 b.grid(row=row, column=2, sticky="ew", padx=(10, 0), pady=5)
                 self.inputs.append(b)
 
-        entry_row(2, "YOLO model (.pt)", self.model_var, self._choose_model)
+        entry_row(2, "YOLO model (.pt / .engine / .onnx)", self.model_var, self._choose_model)
         mode_row = ttk.Frame(frame)
         mode_row.grid(row=3, column=0, columnspan=3, sticky="w", pady=5)
         ttk.Label(mode_row, text="Dataset source").pack(side="left", padx=(0, 18))
@@ -734,6 +896,13 @@ class RecallTestGUI:
         self.mode_choice.pack(side="left")
         self.mode_choice.bind("<<ComboboxSelected>>", lambda _e: self._mode_changed())
         self.inputs.append(self.mode_choice)
+        self.runtime_hint_label = ttk.Label(mode_row, textvariable=self.engine_runtime_var,
+                                             foreground="#555555", wraplength=365)
+        self.runtime_hint_label.pack(side="left", padx=(15, 0))
+        self.runtime_button = ttk.Button(mode_row, text="Runtime Python…", command=self._choose_runtime)
+        self.runtime_button.pack(side="left", padx=(8, 0))
+        self.runtime_button.pack_forget()
+        self.inputs.append(self.runtime_button)
         self.source_label = ttk.Label(frame, text="Dataset YAML")
         self.source_label.grid(row=4, column=0, sticky="w", padx=(0, 15), pady=5)
         source = ttk.Entry(frame, textvariable=self.source_var)
@@ -945,10 +1114,50 @@ class RecallTestGUI:
             self.source_var.set(str(config or (selected / "images" if (selected / "images").is_dir() else selected)))
 
     def _choose_model(self):
-        path = filedialog.askopenfilename(parent=self.root, title="Select YOLO checkpoint",
-                                          filetypes=[("PyTorch model", "*.pt"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Select an Ultralytics model",
+            filetypes=[("Ultralytics models", "*.pt *.engine *.onnx"),
+                       ("TensorRT engine", "*.engine"), ("PyTorch model", "*.pt"),
+                       ("ONNX model", "*.onnx"), ("All files", "*.*")])
         if path:
             self.model_var.set(path)
+            if Path(path).suffix.lower() == ".engine":
+                metadata = engine_export_settings(path)
+                if metadata:
+                    size = metadata.get("imgsz")
+                    if size is not None:
+                        size = parse_image_size(size)
+                        self.imgsz_var.set(str(size) if isinstance(size, int) else "x".join(map(str, size)))
+                    if metadata.get("batch") is not None:
+                        self.batch_var.set(str(metadata["batch"]))
+                    self._append_log("Loaded TensorRT image size/batch from export_summary.json.")
+                else:
+                    self.batch_var.set("1")
+                    self._append_log("No Studio export metadata found: set image size to the engine's "
+                                     "input dimensions; batch defaults to 1.")
+
+    def _refresh_runtime_hint(self):
+        if Path(self.model_var.get().strip().strip('"')).suffix.lower() == ".engine":
+            chosen = load_selection() or sys.executable
+            location = ("Model Export Python" if load_selection() else "Studio Python")
+            suffix = ("…" + chosen[-36:]) if len(chosen) > 36 else chosen
+            self.engine_runtime_var.set(f"TensorRT runtime ({location}): {suffix}")
+            self.runtime_button.pack(side="left", padx=(8, 0))
+            self.runtime_button.configure(state="normal" if not self.busy else "disabled")
+        else:
+            self.engine_runtime_var.set("")
+            self.runtime_button.pack_forget()
+
+    def _choose_runtime(self):
+        filename = filedialog.askopenfilename(
+            parent=self.root, title="Choose Python used by SenSoRTC for TensorRT inference",
+            filetypes=[("Python interpreter", "python python3 python3.* python.exe"),
+                       ("All files", "*.*")])
+        if filename:
+            save_selection(filename)  # Shared with 07 Model Export.
+            self._refresh_runtime_hint()
+            self._append_log("TensorRT inference Python selected (shared with 07 Model Export): " +
+                             str(Path(filename).resolve()))
 
     def _choose_source(self):
         if self.mode_var.get() == "Dataset YAML":
@@ -972,8 +1181,8 @@ class RecallTestGUI:
         mode = self.mode_var.get()
         model = Path(model_text).expanduser()
         source = Path(source_text).expanduser()
-        if not model_text or not model.is_file() or model.suffix.lower() != ".pt":
-            raise ValueError("Select an existing .pt model file.")
+        if not model_text or not model.is_file() or model.suffix.lower() not in MODEL_EXTENSIONS:
+            raise ValueError("Select an existing Ultralytics .pt, .engine or .onnx model file.")
         if not source_text or not (source.is_file() if mode == "Dataset YAML" else source.is_dir()):
             raise ValueError("Select an existing dataset YAML or image folder.")
         if mode == "Dataset YAML" and source.suffix.lower() not in (".yaml", ".yml"):
@@ -983,22 +1192,26 @@ class RecallTestGUI:
         try:
             precision = parse_target_precision(self.precision_var.get())
             cls = int(self.class_var.get().strip())
-            imgsz = int(self.imgsz_var.get().strip())
+            imgsz = parse_image_size(self.imgsz_var.get().strip())
             batch = int(self.batch_var.get().strip())
             match_iou = float(self.match_var.get().strip())
             nms_iou = float(self.nms_var.get().strip())
             max_det = int(self.maxdet_var.get().strip())
         except (ValueError, OverflowError) as exc:
             raise ValueError(f"Invalid number: {exc}") from exc
-        if cls < 0 or imgsz < 32 or batch < 1 or max_det < 1 or not (0 < match_iou <= 1) or not (0 < nms_iou <= 1):
+        if cls < 0 or batch < 1 or max_det < 1 or not (0 < match_iou <= 1) or not (0 < nms_iou <= 1):
             raise ValueError("Class >=0, size >=32, batch/max detections >=1, IoUs in (0, 1].")
-        return dict(model=str(model.resolve()), mode=mode, source=str(source.resolve()),
+        settings = dict(model=str(model.resolve()), mode=mode, source=str(source.resolve()),
                     output=str(Path(output_text).expanduser().resolve()),
                     split=self.split_var.get(), precision=precision, food_class=cls,
                     imgsz=imgsz, batch=batch, match_iou=match_iou,
                     nms_iou=nms_iou, max_det=max_det, device=self.device_var.get(),
                     agnostic_nms=self.agnostic_nms_var.get(),
                     reuse_cache=self.reuse_var.get(), save_plots=self.plots_var.get())
+        if model.suffix.lower() == ".engine":
+            settings["evaluation_python"] = load_selection() or sys.executable
+            validate_engine_input_settings(settings)
+        return settings
 
     def _start(self, cache_only):
         if self.busy:
@@ -1022,8 +1235,11 @@ class RecallTestGUI:
 
         def worker():
             try:
-                evaluate(settings, lambda kind, value: self.messages.put((kind, value)),
-                         cache_only=cache_only, cancel_event=self.cancel_event)
+                emit = lambda kind, value: self.messages.put((kind, value))
+                if Path(settings["model"]).suffix.lower() == ".engine" and not cache_only:
+                    run_engine_evaluation(settings, emit, cancel_event=self.cancel_event)
+                else:
+                    evaluate(settings, emit, cache_only=cache_only, cancel_event=self.cancel_event)
             except EvaluationCancelled:
                 self.messages.put(("cancelled", "Evaluation stopped by user."))
             except Exception as exc:
@@ -1109,6 +1325,7 @@ class RecallTestGUI:
         self.stop_button.configure(state="disabled")
         for widget in self.inputs:
             widget.configure(state="normal")
+        self._refresh_runtime_hint()
         self.mode_choice.configure(state="readonly")
         self.split_choice.configure(state="readonly" if self.mode_var.get() == "Dataset YAML" else "disabled")
         for widget in self.inputs:

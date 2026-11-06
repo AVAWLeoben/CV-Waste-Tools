@@ -1,0 +1,56 @@
+CV Waste Studio v18.3 — Precision/Recall with exported TensorRT engines
+=======================================================================
+
+01 — Supported model input files
+  - PyTorch checkpoints (.pt) — unchanged behavior.
+  - TensorRT engines (.engine) — now available for Ultralytics prediction-based
+    cached Recall@Target Precision evaluation.
+  - ONNX models (.onnx) — also accepted if the Studio environment contains a
+    working ONNX inference runtime.
+
+02 — Choosing the TensorRT inference environment
+  - Go to 07 Model Export and select the SenSoRTC Python interpreter that
+    runs the deployment application, or click "Runtime Python…" on the
+    Precision / recall page. Both selectors share the same saved selection.
+  - For the verified Jetson Thor setup shared during development:
+      /home/admin/.local/share/SenSoRTC/envs/
+        install-20261106-123223-1db6793b/bin/python
+  - Studio itself remains in the CV-Waste environment. Only .engine inference
+    runs in the selected external interpreter.
+  - No dependency auto-installation or TensorRT upgrades are performed by the
+    Recall worker; YOLO_AUTOINSTALL=False is set in the child environment.
+
+03 — Engine input settings
+  - Fixed-shape engines need the exact image size and batch used during export.
+  - Selecting an engine created by Studio in its original export folder loads
+    size/batch from the colocated export_summary.json.
+  - When that summary is missing (e.g., copied engines), the batch defaults to
+    1; set image size to the actual engine input, e.g. 1280.
+  - The GUI rejects mismatches when the export metadata is available.
+  - Engine evaluation always requires an NVIDIA GPU; CPU is not supported.
+
+04 — Precision/Recall methodology is unchanged
+  - Uses Ultralytics YOLO(model).predict() at a fixed confidence floor 0.01,
+    with the existing NMS IoU / agnostic NMS / max_det settings.
+  - Applies one-to-one IoU matching to YOLO annotation boxes, sweeps confidence
+    thresholds, and reports recall at the requested target precision.
+  - Reuses saved prediction caches and produces the existing CSV, JSON, and
+    optional chart/report PNGs; a cache-only recomputation needs no GPU.
+  - Cache keys for .engine now include the selected evaluation interpreter.
+  - Output summaries record the prediction Python and TensorRT version when
+    available.
+
+05 — Safety and troubleshooting
+  - Incompatible TRT engine serialization versions will be reported as an
+    inference error; Studio does not load a native TensorRT runtime into the
+    Tkinter GUI process.
+  - The worker runs in a separate Python process with streamed status/logs.
+  - Stop evaluation asks the process to stop after its current safe inference
+    step, even while it is silent.
+  - Real TensorRT inference on Jetson Thor must be verified on the target GPU.
+  - The synthetic/mocked tests and cached subprocess round-trip do not confirm
+    GPU compatibility or benchmark accuracy on Thor.
+
+Updating existing v18.2 installations
+  Back up and close Studio, extract the small patch over your existing
+  CV_Waste_Studio folder, restart, and open 03 Precision / recall.
