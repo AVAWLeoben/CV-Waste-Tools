@@ -31,7 +31,7 @@ Studio uses the **Ultralytics YOLO APIs** for training, prediction, validation, 
 |:---:|:---:|
 | ![Live epoch progress and training graphs](https://github.com/AVAWLeoben/CV-Waste-Tools/blob/ecf039770e66e4642f95453b427ef8c5cb1d06c9/Screenshots/Live%20epoch%20progress%20and%20training%20graphs.png) | ![Hyperparameter tuning dashboard](https://github.com/AVAWLeoben/CV-Waste-Tools/blob/ecf039770e66e4642f95453b427ef8c5cb1d06c9/Screenshots/Hyperparameter%20tuning%20dashboard.png) |
 
-![Model export with platform and dependency checks](docs/images/studio-export.png)
+![Model export with platform and dependency checks](https://github.com/AVAWLeoben/CV-Waste-Tools/blob/9be5cd75684ad106cbe8e1bd7b2b98f8443d376c/Screenshots/model_export.png)
 
 *Screenshots illustrate the interface; plotted example values may be simulated rather than benchmark measurements.*
 
