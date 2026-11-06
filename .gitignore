@@ -13,13 +13,19 @@ CV_Waste-Tools/__pycache__/
 # Ignore Python cache directories
 __pycache__/
 
+# Ignore all PNG files
+*.png
+
+# Exception: allow CV Waste Studio branding assets
+!CV_Waste_Studio/assets/*.png
+!CV_Waste_Studio/assets/*.ico
+
 # Ignore all .log files
 *.log
 *.tflite
 *.pt
 *.csv
 *.json
-*.png
 *.npz
 *.pyc
 *.lnk
