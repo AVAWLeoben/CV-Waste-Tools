@@ -14,8 +14,80 @@ from pathlib import Path
 import platform
 import re
 import sys
+import subprocess
 
 EXPORT_FORMATS = ("onnx", "engine", "litert")
+EXPORT_EXTENSIONS = {"onnx": ".onnx", "engine": ".engine", "litert": ".tflite"}
+_WINDOWS_RESERVED_NAMES = {"con", "prn", "aux", "nul"} | {
+    f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
+}
+
+
+def normalize_export_model_name(value, fmt):
+    """Return a filename stem or empty string for Ultralytics' default name.
+
+    Users may enter a plain stem or include the suffix for the selected format.
+    Validate against Windows filenames even on Linux to support shared/WSL paths.
+    """
+    if fmt not in EXPORT_EXTENSIONS:
+        raise ValueError("Unknown export format: " + str(fmt))
+    name = str(value or "").strip()
+    if not name:
+        return ""
+    suffix = Path(name).suffix.lower()
+    expected = EXPORT_EXTENSIONS[fmt]
+    if suffix in EXPORT_EXTENSIONS.values():
+        if suffix != expected:
+            raise ValueError(f"The selected format uses {expected}, not {suffix}. Change the filename or export format.")
+        name = name[:-len(suffix)]
+    if (not name or name in (".", "..") or name.startswith(".")
+            or name.endswith((" ", ".")) or any(ord(ch) < 32 for ch in name)
+            or any(ch in '<>:"/\\|?*' for ch in name)):
+        raise ValueError("Model name must be a filename, without folder paths or characters < > : \" / \\ | ? *.")
+    if name.split(".", 1)[0].lower() in _WINDOWS_RESERVED_NAMES:
+        raise ValueError("Model name is a reserved Windows filename; choose another name.")
+    if len((name + expected).encode("utf-8")) > 240:
+        raise ValueError("Model filename is too long (maximum 240 UTF-8 bytes including extension).")
+    return name
+
+
+def requested_export_filename(model_name, fmt):
+    """Full requested file name, or empty string to keep exporter's default."""
+    stem = normalize_export_model_name(model_name, fmt)
+    return stem + EXPORT_EXTENSIONS[fmt] if stem else ""
+
+
+def host_tensorrt_version(platform_name=None):
+    """System libnvinfer package version, for diagnostic comparison only."""
+    if (platform_name or sys.platform) != 'linux':
+        return None
+    for package in ('libnvinfer10', 'libnvinfer11', 'libnvinfer8'):
+        try:
+            result = subprocess.run(['dpkg-query', '-W', '-f=${Version}', package],
+                                    capture_output=True, text=True, timeout=3, check=False)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().split('-', 1)[0]
+        except (OSError, subprocess.TimeoutExpired):
+            break
+    return None
+
+
+def is_jetson_environment(platform_name, machine, gpu=None):
+    if platform_name != 'linux' or machine not in {'aarch64', 'arm64'}:
+        return False
+    markers = ('/etc/nv_tegra_release', '/etc/nvidia-container-runtime/host-files-for-container.d')
+    return (any(Path(marker).exists() for marker in markers)
+            or any(x in (gpu or '').lower() for x in ('thor', 'jetson', 'orin', 'xavier')))
+
+
+def tensorrt_versions_match(python_version, host_version):
+    if not python_version or not host_version:
+        return None
+    def numbers(text):
+        return tuple(int(v) for v in re.findall(r'\d+', str(text))[:4])
+    a, b = numbers(python_version), numbers(host_version)
+    return a == b if a and b else None
+
 
 
 def detect_export_formats():
@@ -41,7 +113,9 @@ def probe_export_environment(platform_name=None, machine=None):
     report = {"python": sys.executable, "platform": platform_name, "machine": machine,
               "ultralytics": None, "formats": {}, "tensorrt": None,
               "cuda": False, "cuda_build": None, "gpu": None,
-              "errors": {}, "install_package": "tensorrt"}
+              "errors": {}, "install_package": "tensorrt",
+              "host_tensorrt": host_tensorrt_version(platform_name),
+              "tensorrt_version_match": None, "jetson": False}
     for name in EXPORT_FORMATS:
         report["formats"][name] = {"available": False, "reason": "Not checked"}
     try:
@@ -102,6 +176,11 @@ def probe_export_environment(platform_name=None, machine=None):
             report["install_package"] = "tensorrt-cu13"
     except Exception as exc:
         report["errors"]["torch"] = f"{type(exc).__name__}: {exc}"
+    report['jetson'] = is_jetson_environment(platform_name, machine, report['gpu'])
+    if report['jetson']:
+        # JetPack's package-managed TensorRT must never be replaced by a
+        # PyPI wheel just to satisfy an export probe.
+        report['install_package'] = None
     if not report["cuda"]:
         report["formats"]["engine"]["reason"] = "TensorRT export needs a CUDA-capable NVIDIA GPU in this environment."
     elif "engine" not in available:
@@ -112,7 +191,17 @@ def probe_export_environment(platform_name=None, machine=None):
             if not callable(getattr(trt, "Builder", None)):
                 raise RuntimeError("The TensorRT full builder bindings are unavailable (lean runtime is insufficient).")
             report["tensorrt"] = str(getattr(trt, "__version__", "unknown"))
-            report["formats"]["engine"] = {"available": True, "argument": "engine", "reason": "Ready"}
+            report['tensorrt_module'] = str(getattr(trt, '__file__', ''))
+            report['tensorrt_version_match'] = tensorrt_versions_match(
+                report['tensorrt'], report['host_tensorrt'])
+            if report['jetson'] and report['tensorrt_version_match'] is False:
+                report['formats']['engine'] = {
+                    'available': False, 'argument': 'engine',
+                    'reason': 'JetPack TensorRT ' + str(report['host_tensorrt']) +
+                              ' differs from Python TensorRT ' + str(report['tensorrt']) +
+                              '; select the matching SenSoRTC environment.'}
+            else:
+                report["formats"]["engine"] = {"available": True, "argument": "engine", "reason": "Ready"}
         except Exception as exc:
             report["errors"]["tensorrt"] = f"{type(exc).__name__}: {exc}"
             report["formats"]["engine"]["reason"] = (
@@ -222,6 +311,7 @@ def validate_export_settings(data, capabilities=None):
     output = str(config.get("output", "")).strip()
     if output:
         output = str(Path(output).expanduser().resolve())
+    model_name = normalize_export_model_name(config.get("model_name", ""), fmt)
     return {
         "model": source, "format": fmt, "ultralytics_format": actual_format,
         "imgsz": imgsz, "batch": batch, "precision": precision,
@@ -231,7 +321,9 @@ def validate_export_settings(data, capabilities=None):
         "data": config.get("data", ""), "fraction": fraction,
         "workspace": workspace, "opset": opset,
         "output": output, "backend": backend,
+        "model_name": model_name,
         "wsl_distribution": str(config.get("wsl_distribution", "")).strip(),
+        "export_python": str(config.get("export_python", "")).strip(),
     }
 
 
@@ -261,6 +353,10 @@ def build_export_kwargs(config, supports_quantize=True):
 
 def run_export_job(config, model_factory=None):
     """Export using native YOLO.export, keeping source checkpoints untouched."""
+    # Must happen before importing Ultralytics: prevents automatic pip/apt
+    # updates, including automatic replacement of JetPack's TensorRT package.
+    os.environ['YOLO_AUTOINSTALL'] = 'False'
+    real_export = model_factory is None
     if model_factory is None:
         from ultralytics import YOLO
         model_factory = YOLO
@@ -318,13 +414,70 @@ def run_export_job(config, model_factory=None):
             else:
                 shutil.copy2(result_path, destination)
             result_path = destination
+        # Ultralytics chooses its own output name; apply the user's name only
+        # *after* conversion and *before* TensorRT inference verification.
+        # Never rename directories or overwrite an existing export artifact.
+        requested = requested_export_filename(cfg["model_name"], cfg["format"])
+        if requested:
+            if not result_path.is_file():
+                raise RuntimeError("Cannot rename this export: Ultralytics returned a directory, not a model file.")
+            destination = run_folder / requested
+            if result_path != destination:
+                if destination.exists():
+                    raise FileExistsError("Custom export filename already exists: " + str(destination))
+                result_path.rename(destination)
+                result_path = destination
+        verification = {'verified': None, 'status': 'not_applicable'}
+        if cfg['format'] == 'engine':
+            if real_export:
+                verification = validate_engine_with_selected_runtime(result_path, cfg['imgsz'])
+            else:
+                verification = {'verified': None, 'status': 'mock_export_not_verified'}
         metadata = {"source_model": str(checkpoint.resolve()), "exported_model": str(result_path),
                     "output_directory": str(run_folder.resolve()),
-                    "settings": cfg, "ultralytics_arguments": kwargs}
+                    "settings": cfg, "ultralytics_arguments": kwargs,
+                    "build_python": sys.executable,
+                    "tensorrt_verification": verification}
         (run_folder / "export_summary.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        if verification.get('verified') is False:
+            raise RuntimeError('TensorRT engine was exported but deployment validation failed: '
+                               + verification.get('error', 'unknown failure')
+                               + '. The unverified engine is kept for diagnostics; do not deploy it.')
         print("STUDIO_EXPORT_RESULT=" + json.dumps(metadata), flush=True)
         return metadata
     finally:
         # Delete only the private source *copy*, never the actual model.
         if working_input.is_file():
             working_input.unlink()
+
+
+def validate_engine_with_selected_runtime(engine_path, imgsz, timeout=240):
+    """Run a real synthetic inference in an isolated child of this interpreter.
+
+    Child isolation prevents a broken/segfaulting TensorRT runtime from taking
+    down the exporter before we can record its verification result.
+    """
+    env = dict(os.environ, YOLO_AUTOINSTALL='False')
+    script = Path(__file__).with_name('verify_tensorrt_engine.py')
+    try:
+        result = subprocess.run([sys.executable, '-u', str(script), str(engine_path),
+                                 '--imgsz', json.dumps(imgsz)],
+                                cwd=str(script.parent), env=env, capture_output=True,
+                                text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {'verified': False, 'error': f'Could not run verification: {exc}'}
+    record = next((line.split('=', 1)[1] for line in result.stdout.splitlines()
+                   if line.startswith('STUDIO_ENGINE_VERIFICATION=')), None)
+    if record:
+        try:
+            payload = json.loads(record)
+        except ValueError:
+            payload = {'verified': False, 'error': 'Malformed verifier result'}
+    else:
+        payload = {'verified': False,
+                   'error': (result.stderr or result.stdout or 'Verifier returned no result')[-1500:]}
+    if result.returncode != 0:
+        payload['verified'] = False
+    print('STUDIO_EXPORT_STATUS=' + ('TensorRT engine verified by inference' if payload.get('verified')
+                                    else 'TensorRT engine FAILED deployment verification'), flush=True)
+    return payload

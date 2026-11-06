@@ -1,0 +1,23 @@
+CV Waste Studio v18.2 — Custom model export filenames
+====================================================
+
+07 Model Export → 02 Source model & destination → Exported model name
+
+Enter a model name such as YOLO11L_1280_FP16 or YOLO11L_1280_FP16.engine.
+Studio automatically chooses the extension for the selected export format:
+  ONNX            .onnx
+  TensorRT Engine .engine
+  LiteRT          .tflite
+
+Leave the field blank to preserve Ultralytics' native export filename.
+Names are validated for Windows/Linux portability and cannot contain
+folder separators, invalid Windows filename characters or reserved names.
+Conflicting extensions are rejected, not silently changed.
+
+Exports still use their own timestamped output folder, and source .pt files
+remain untouched. The renamed file path is recorded in export_summary.json,
+shown in the activity log, and used for TensorRT deployment verification.
+Windows WSL2 LiteRT exports also honour custom filenames.
+
+No change is made to Ultralytics' YOLO.export() API or the selected Python
+environment. Dependency auto-installation stays disabled.

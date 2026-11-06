@@ -1,0 +1,33 @@
+CV Waste Studio v18.1 — Model Export target display fix
+=======================================================
+
+Symptom
+-------
+The export status line could continue to say "target: ONNX" after the operator
+selected "TensorRT Engine" in 07 Model Export.
+
+Cause
+-----
+The status line was populated only by the environment compatibility probe,
+not by the format selection event. A second issue allowed an environment probe
+to silently change an unavailable selected format back to ONNX.
+
+Changes
+-------
+- Status text updates immediately when the operator chooses a new format.
+- The selected radio button is the source of truth for format, validation,
+  worker configuration, and the visible status.
+- When the selected format is unavailable after a probe, Studio keeps that
+  selection and shows the exact incompatibility reason. Export is disabled
+  until a compatible environment is selected or the operator chooses another
+  available format.
+- The export activity log explicitly states the selected format and the
+  native Ultralytics format argument (e.g. 'engine').
+- All other TensorRT safeguards introduced in v18 remain unchanged.
+
+Verification
+------------
+Run: python -m unittest discover -s tests -q
+For Tk tests on headless Linux: xvfb-run -a python -m unittest discover -s tests -q
+
+No real TensorRT build was performed; validate on Jetson Thor before deployment.

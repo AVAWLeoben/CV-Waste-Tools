@@ -12,6 +12,7 @@ def main(argv=None):
     parser.add_argument("settings_json", type=Path)
     args = parser.parse_args(argv)
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    os.environ['YOLO_AUTOINSTALL'] = 'False'  # no pip/apt changes to JetPack or SenSoRTC
     settings = json.loads(args.settings_json.read_text(encoding="utf-8"))
     if sys.platform == "win32" and settings.get("format") == "litert":
         from wsl_litert import run_wsl_litert_export

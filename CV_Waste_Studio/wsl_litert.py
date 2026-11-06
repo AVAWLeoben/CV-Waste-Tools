@@ -213,7 +213,8 @@ def run_wsl_litert_export(config, *, probe=probe_wsl_litert, run=_execute, popen
             calib_wsl = windows_to_wsl(cfg["data"], distro, run=run)
         job = {"model": wsl_copy, "output": wsl_output, "format": capabilities["argument"],
                "imgsz": cfg["imgsz"], "batch": cfg["batch"], "precision": cfg["precision"],
-               "data": calib_wsl, "fraction": cfg["fraction"], "nms": cfg["nms"]}
+               "data": calib_wsl, "fraction": cfg["fraction"], "nms": cfg["nms"],
+               "model_name": cfg["model_name"]}
         json_file = job_folder / "wsl_export_request.json"
         json_file.write_text(json.dumps(job, indent=2), encoding="utf-8")
         wsl_request = windows_to_wsl(json_file, distro, run=run)

@@ -38,6 +38,8 @@ def main(argv=None, model_factory=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("request", type=Path)
     args = parser.parse_args(argv)
+    # WSL export is a conversion, not permission to modify the Linux venv.
+    os.environ['YOLO_AUTOINSTALL'] = 'False'
     config = json.loads(args.request.read_text(encoding="utf-8"))
     model_path = Path(config["model"])
     if not model_path.is_file():
@@ -68,8 +70,11 @@ def main(argv=None, model_factory=None):
         exported = Path(str(result)).resolve()
         if not exported.is_file() or exported.suffix.lower() != ".tflite":
             raise RuntimeError("Ultralytics did not produce a .tflite model: " + str(exported))
-        dest = output / (model_path.stem + "_" + str(config["imgsz"]).replace(" ", "").replace("[", "").replace("]", "").replace(",", "x") +
-                         ("_int8" if config["precision"] == "int8" else "_fp32") + ".tflite")
+        from model_export import requested_export_filename
+        desired_name = requested_export_filename(config.get("model_name", ""), "litert")
+        dest = output / (desired_name or (
+            model_path.stem + "_" + str(config["imgsz"]).replace(" ", "").replace("[", "").replace("]", "").replace(",", "x") +
+            ("_int8" if config["precision"] == "int8" else "_fp32") + ".tflite"))
         if dest != exported:
             if dest.exists():
                 raise FileExistsError("Output already exists: " + str(dest))

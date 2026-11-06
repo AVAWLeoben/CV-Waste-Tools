@@ -15,6 +15,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from model_export import validate_export_settings
+from export_environment import (discover_export_environments, make_export_process_env,
+                                load_selection, save_selection)
 
 ACCENT = "#405DE6"
 MUTED = "#60718A"
@@ -45,6 +47,7 @@ class ModelExportPanel(tk.Frame):
         self._last_result = None
         self._expanded_setup = False
         self._tab_opened = False
+        self._env_options = {}
         self._build()
         self.after(500, self.check_compatibility)
 
@@ -117,8 +120,20 @@ class ModelExportPanel(tk.Frame):
             ttk.Label(wrapper, textvariable=note, style="Muted.TLabel").pack(side="right", padx=4)
             self.radios[fmt] = radio
             self.format_status[fmt] = note
-        compatibility_row = ttk.Frame(body)
-        compatibility_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(5, 10))
+        compatibility_block = ttk.Frame(body)
+        compatibility_block.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(5, 10))
+        environment_row = ttk.Frame(compatibility_block)
+        environment_row.pack(fill="x", pady=(0, 5))
+        ttk.Label(environment_row, text="Export Python environment", width=27).pack(side="left")
+        self.export_env_choice = tk.StringVar()
+        self.env_combo = ttk.Combobox(environment_row, textvariable=self.export_env_choice,
+                                      state="readonly", width=52)
+        self.env_combo.pack(side="left", padx=(11, 5), fill="x", expand=True)
+        self.env_combo.bind('<<ComboboxSelected>>', self._environment_changed)
+        ttk.Button(environment_row, text="Refresh", command=self.refresh_environments).pack(side="left", padx=3)
+        ttk.Button(environment_row, text="Browse Python…", command=self.browse_environment).pack(side="left", padx=3)
+        compatibility_row = ttk.Frame(compatibility_block)
+        compatibility_row.pack(fill="x")
         ttk.Button(compatibility_row, text="Recheck environment",
                    command=self.check_compatibility).pack(side="left")
         self.install_btn = ttk.Button(compatibility_row, text="Install TensorRT…",
@@ -128,24 +143,28 @@ class ModelExportPanel(tk.Frame):
                                         command=self.setup_wsl, state="disabled")
         self.wsl_setup_btn.pack(side="left", padx=5)
         ttk.Label(compatibility_row,
-                  text="TensorRT installs into Conda; Windows LiteRT uses a separate WSL2 Python environment.",
+                  text="External/Jetson environments are read-only. No automatic package installation during export.",
                   style="Muted.TLabel", wraplength=390).pack(side="left", fill="x", expand=True)
 
         ttk.Separator(body).grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 12))
         ttk.Label(body, text="02  Source model & destination", font=("Segoe UI", 12, "bold")).grid(
             row=6, column=0, columnspan=3, sticky="w", pady=(0, 7))
         self.model = tk.StringVar()
+        self.model_name = tk.StringVar()
         self.output = tk.StringVar(value=str(self.logs_dir / "exports"))
         self._row(body, 7, "YOLO checkpoint (.pt)", self.model,
                   lambda: self._choose_file(self.model, "Select trained model", [("PyTorch model", "*.pt")]))
-        self._row(body, 8, "Export root folder", self.output,
+        self._row(body, 8, "Exported model name", self.model_name)
+        ttk.Label(body, text="For example: YOLO11L_1280_FP16. Extension is added automatically; blank = original name.",
+                  style="Muted.TLabel").grid(row=9, column=1, columnspan=2, sticky="w", pady=(0, 5))
+        self._row(body, 10, "Export root folder", self.output,
                   lambda: self._choose_folder(self.output))
         ttk.Label(body, text="Each export gets its own dated subfolder. The source checkpoint is never modified.",
-                  style="Muted.TLabel").grid(row=9, column=1, columnspan=2, sticky="w", pady=(0, 5))
+                  style="Muted.TLabel").grid(row=11, column=1, columnspan=2, sticky="w", pady=(0, 5))
 
-        ttk.Separator(body).grid(row=10, column=0, columnspan=3, sticky="ew", pady=(6, 12))
+        ttk.Separator(body).grid(row=12, column=0, columnspan=3, sticky="ew", pady=(6, 12))
         ttk.Label(body, text="03  Export parameters", font=("Segoe UI", 12, "bold")).grid(
-            row=11, column=0, columnspan=3, sticky="w", pady=(0, 7))
+            row=13, column=0, columnspan=3, sticky="w", pady=(0, 7))
         self.imgsz = tk.StringVar(value="640")
         self.batch = tk.StringVar(value="1")
         self.device = tk.StringVar(value="auto")
@@ -157,42 +176,43 @@ class ModelExportPanel(tk.Frame):
         self.workspace = tk.StringVar()
         self.data = tk.StringVar()
         self.fraction = tk.StringVar(value="1.0")
-        self._row(body, 12, "Image size (H×W or square)", self.imgsz)
+        self._row(body, 14, "Image size (H×W or square)", self.imgsz)
         ttk.Label(body, text="Examples: 640, 960, 1088, 640x1088. Ultralytics aligns sizes to the model stride.",
-                  style="Muted.TLabel").grid(row=13, column=1, columnspan=2, sticky="w", pady=(0, 5))
-        self._row(body, 14, "Inference batch", self.batch)
-        ttk.Label(body, text="Precision").grid(row=15, column=0, sticky="w", pady=4)
+                  style="Muted.TLabel").grid(row=15, column=1, columnspan=2, sticky="w", pady=(0, 5))
+        self._row(body, 16, "Inference batch", self.batch)
+        ttk.Label(body, text="Precision").grid(row=17, column=0, sticky="w", pady=4)
         self.precision_combo = ttk.Combobox(body, textvariable=self.precision, state="readonly",
                                             values=("fp32", "fp16", "int8"), width=16)
-        self.precision_combo.grid(row=15, column=1, sticky="w", pady=4)
+        self.precision_combo.grid(row=17, column=1, sticky="w", pady=4)
         self.precision_combo.bind("<<ComboboxSelected>>", lambda _: self._format_changed())
-        ttk.Label(body, text="Device").grid(row=16, column=0, sticky="w", pady=4)
+        ttk.Label(body, text="Device").grid(row=18, column=0, sticky="w", pady=4)
         self.device_combo = ttk.Combobox(body, textvariable=self.device,
                                          values=("auto", "0", "cpu"), state="readonly", width=16)
-        self.device_combo.grid(row=16, column=1, sticky="w", pady=4)
+        self.device_combo.grid(row=18, column=1, sticky="w", pady=4)
         flags = ttk.Frame(body)
-        flags.grid(row=17, column=1, columnspan=2, sticky="w", pady=5)
+        flags.grid(row=19, column=1, columnspan=2, sticky="w", pady=5)
         self.dynamic_check = ttk.Checkbutton(flags, text="Dynamic input shapes", variable=self.dynamic)
         self.dynamic_check.pack(side="left", padx=(0, 18))
         self.simplify_check = ttk.Checkbutton(flags, text="Simplify ONNX graph", variable=self.simplify)
         self.simplify_check.pack(side="left", padx=(0, 18))
         self.nms_check = ttk.Checkbutton(flags, text="Embed NMS", variable=self.nms)
         self.nms_check.pack(side="left")
-        self._row(body, 18, "ONNX opset (optional)", self.opset)
+        self._row(body, 20, "ONNX opset (optional)", self.opset)
         self.workspace_row = ttk.Frame(body)
-        self.workspace_row.grid(row=19, column=0, columnspan=3, sticky="ew", pady=2)
+        self.workspace_row.grid(row=21, column=0, columnspan=3, sticky="ew", pady=2)
         ttk.Label(self.workspace_row, text="TensorRT workspace (GiB)", width=27).pack(side="left")
         self.workspace_entry = ttk.Entry(self.workspace_row, textvariable=self.workspace, width=16)
         self.workspace_entry.pack(side="left", padx=(11, 4))
         ttk.Label(self.workspace_row, text="Blank = TensorRT auto", style="Muted.TLabel").pack(side="left", padx=12)
-        self._row(body, 20, "INT8 calibration data.yaml", self.data,
+        self._row(body, 22, "INT8 calibration data.yaml", self.data,
                   lambda: self._choose_file(self.data, "Choose representative calibration data.yaml",
                                             [("Dataset YAML", "*.yaml *.yml")]))
-        self._row(body, 21, "INT8 calibration fraction", self.fraction)
+        self._row(body, 23, "INT8 calibration fraction", self.fraction)
         self.calibration_note = ttk.Label(body, text="INT8 requires representative images; avoid unrelated default datasets.",
                                           style="Muted.TLabel")
-        self.calibration_note.grid(row=22, column=1, columnspan=2, sticky="w", pady=(2, 5))
+        self.calibration_note.grid(row=24, column=1, columnspan=2, sticky="w", pady=(2, 5))
         self._format_changed()
+        self.refresh_environments(initial=True)
 
         footer = ttk.Frame(main)
         footer.pack(fill="x", pady=(9, 4))
@@ -256,6 +276,32 @@ class ModelExportPanel(tk.Frame):
             widget.configure(state="normal" if supported else "disabled")
         self.workspace_entry.configure(state="normal" if fmt == "engine" else "disabled")
         self.device_combo.configure(state="disabled" if fmt in ("engine", "litert") else "readonly")
+        # The format radio buttons are the source of truth. Update the summary
+        # immediately; a capability probe may have reported ONNX before the
+        # operator subsequently selected TensorRT Engine.
+        self._update_target_status()
+
+    def _update_target_status(self):
+        """Keep the visible target and Export button synced with the radio selection."""
+        if not self.compat:
+            return
+        fmt = self.fmt.get()
+        entry = self.compat.get("formats", {}).get(fmt, {})
+        ready = bool(entry.get("available"))
+        if hasattr(self, "start_btn"):
+            self.start_btn.configure(state=(
+                "normal" if ready and not self.busy and not self._probe_pending else "disabled"))
+        name = FORMATS.get(fmt, (fmt.upper(), ""))[0]
+        if ready:
+            gpu = str(self.compat.get("gpu")) if self.compat.get("cuda") else "CPU/no CUDA GPU"
+            self.status.set("Export capabilities checked · Ultralytics " +
+                            str(self.compat.get("ultralytics") or "missing") +
+                            " · " + gpu + " · Target: " + name + " (ready)")
+        else:
+            reason = str(entry.get("reason", "Unknown compatibility issue"))
+            self.status.set("Selected target: " + name +
+                            " — unavailable: " + reason +
+                            ". Select a compatible export environment or recheck.")
 
     def toggle_setup(self):
         self._expanded_setup = not self._expanded_setup
@@ -277,18 +323,72 @@ class ModelExportPanel(tk.Frame):
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    def _export_python(self):
+        return self._env_options.get(self.export_env_choice.get(), str(self.env_python()))
+
+    def _export_env(self):
+        return make_export_process_env(dict(self.process_env()), self._export_python(),
+                                       str(self.env_python()))
+
+    def _external_export_python(self):
+        return Path(self._export_python()).resolve() != Path(self.env_python()).resolve()
+
+    def refresh_environments(self, initial=False):
+        preferred = load_selection() if initial else self._export_python()
+        items = discover_export_environments(str(self.env_python()))
+        self._env_options = {item['label'] + '  |  ' + item['python']: item['python'] for item in items}
+        if preferred and Path(preferred).is_file() and preferred not in self._env_options.values():
+            self._env_options['Custom · ' + preferred] = preferred
+        self.env_combo.configure(values=tuple(self._env_options))
+        name = next((label for label, python in self._env_options.items() if python == preferred), None)
+        if name is None:
+            name = next(iter(self._env_options), '')
+        self.export_env_choice.set(name)
+        if not initial:
+            self._environment_changed()
+
+    def browse_environment(self):
+        path = filedialog.askopenfilename(parent=self, title='Select Python used for model export')
+        if not path:
+            return
+        if not Path(path).is_file():
+            messagebox.showerror('Invalid environment', 'Select an existing Python executable.', parent=self)
+            return
+        resolved = str(Path(path).resolve())
+        label = 'Custom · ' + resolved
+        self._env_options[label] = resolved
+        self.env_combo.configure(values=tuple(self._env_options))
+        self.export_env_choice.set(label)
+        self._environment_changed()
+
+    def _environment_changed(self, _event=None):
+        if self.busy:
+            return
+        python = self._export_python()
+        if python and Path(python).is_file():
+            save_selection(python)
+            self._prompted_for_trt = False
+            self.compat = None
+            self._append('Export environment selected: ' + python)
+            self.check_compatibility()
+
+    def _can_install_tensorrt(self):
+        return (not self._external_export_python() and bool(self.compat)
+                and not self.compat.get('jetson') and bool(self.compat.get('cuda'))
+                and bool(self.compat.get('install_package')))
+
     def check_compatibility(self):
         if self._probe_pending or self.install_job is not None or self.busy:
             return
         self._probe_pending = True
-        self.status.set("Checking ONNX, TensorRT and LiteRT in the selected Conda Python…")
+        self.status.set("Checking export formats in: " + self._export_python())
         for radio in self.radios.values():
             radio.configure(state="disabled")
         self.start_btn.configure(state="disabled")
         self.install_btn.configure(state="disabled")
         self.wsl_setup_btn.configure(state="disabled")
-        python = str(self.env_python())
-        env = dict(self.process_env())
+        python = str(self._export_python())
+        env = self._export_env()
         script = str(Path(__file__).with_name("probe_model_export.py"))
         def worker():
             try:
@@ -314,30 +414,34 @@ class ModelExportPanel(tk.Frame):
                 status_text = "✓ Ready" + (" · WSL2" if entry.get("backend") == "wsl" else "") + (
                     " · TFLite legacy" if entry.get("argument") == "tflite" else "")
             elif fmt == "engine":
-                status_text = "TensorRT missing" if report.get("cuda") else "CUDA GPU required"
+                status_text = str(entry.get('reason', 'TensorRT missing'))[:85]
             elif fmt == "litert":
                 status_text = ("WSL: " + str((report.get("wsl") or {}).get("phase", "unavailable"))
                                if report.get("platform") == "win32" else "Exporter unavailable")
             else:
                 status_text = "Exporter unavailable"
             self.format_status[fmt].set(status_text)
-        if not report.get("formats", {}).get(self.fmt.get(), {}).get("available"):
-            choice = next((fmt for fmt in FORMATS
-                           if report.get("formats", {}).get(fmt, {}).get("available")), None)
-            if choice:
-                self.fmt.set(choice)
+        # Never silently switch the operator's selected format (for example,
+        # TensorRT Engine) to the first available format (often ONNX). Retain
+        # the selection, show the incompatibility reason, and disable Export.
         self._format_changed()
-        self.start_btn.configure(state="normal" if any(v.get("available") for v in report["formats"].values()) else "disabled")
         trt_missing = (bool(report.get("cuda")) and bool(report.get("errors", {}).get("tensorrt"))
                        and not report["formats"]["engine"].get("available"))
-        self.install_btn.configure(state="normal" if trt_missing else "disabled")
+        self.install_btn.configure(state="normal" if trt_missing and self._can_install_tensorrt() else "disabled")
         self.wsl_setup_btn.configure(state="normal" if report.get("platform") == "win32" else "disabled")
-        self.status.set("Export capabilities checked · Ultralytics " + str(report.get("ultralytics") or "missing") +
-                        " · " + (str(report.get("gpu")) if report.get("cuda") else "CPU/no CUDA GPU") +
-                        " · target: " + self.fmt.get().upper())
-        if trt_missing and self._tab_opened and not self._prompted_for_trt:
+        self._update_target_status()
+        if trt_missing and self._can_install_tensorrt() and self._tab_opened and not self._prompted_for_trt:
             self._prompted_for_trt = True
             self.after(150, self._offer_tensor_rt)
+        if report.get('tensorrt'):
+            self._append('Python TensorRT: ' + str(report['tensorrt']) +
+                         ' · module: ' + str(report.get('tensorrt_module', 'unknown')))
+        if report.get('host_tensorrt'):
+            self._append('Host/JetPack TensorRT: ' + str(report['host_tensorrt']))
+            if report.get('tensorrt_version_match') is False:
+                self._append('WARNING: Python and host TensorRT versions differ; select the deployment environment.')
+        if report.get('jetson'):
+            self._append('Jetson detected: pip TensorRT installation disabled; using installed JetPack bindings.')
         if report.get("errors", {}).get("ultralytics"):
             self._append("Environment: " + report["errors"]["ultralytics"])
         for fmt in FORMATS:
@@ -360,14 +464,14 @@ class ModelExportPanel(tk.Frame):
         self._tab_opened = True
         if (self.compat and self.compat.get("cuda") and
                 self.compat.get("errors", {}).get("tensorrt") and
-                not self._prompted_for_trt):
+                self._can_install_tensorrt() and not self._prompted_for_trt):
             self._prompted_for_trt = True
             self.after(120, self._offer_tensor_rt)
         # WSL setup is intentionally never prompted just for opening this tab.
         # See WSL status / setup for a diagnostic and explicit opt-in.
 
     def _offer_tensor_rt(self):
-        if self.install_job or not self.winfo_exists():
+        if not self._can_install_tensorrt() or self.install_job or not self.winfo_exists():
             return
         package = self.compat.get("install_package", "tensorrt")
         command = f'"{self.env_python()}" -m pip install --upgrade {package}'
@@ -383,7 +487,7 @@ class ModelExportPanel(tk.Frame):
             self._append("TensorRT install declined; Engine export remains disabled.")
 
     def install_tensorrt(self):
-        if not self.compat or not self.compat.get("cuda") or self.install_job or self.busy:
+        if not self._can_install_tensorrt() or self.install_job or self.busy:
             return
         package = self.compat.get("install_package", "tensorrt")
         command = [str(self.env_python()), "-m", "pip", "install", "--upgrade", package]
@@ -518,6 +622,7 @@ class ModelExportPanel(tk.Frame):
     def _settings(self):
         return validate_export_settings({
             "model": self.model.get(), "output": self.output.get(),
+            "model_name": self.model_name.get(),
             "format": self.fmt.get(), "imgsz": self.imgsz.get(),
             "batch": self.batch.get(), "device": self.device.get(),
             "precision": self.precision.get(), "dynamic": self.dynamic.get(),
@@ -525,6 +630,7 @@ class ModelExportPanel(tk.Frame):
             "opset": self.opset.get(), "workspace": self.workspace.get(),
             "data": self.data.get(), "fraction": self.fraction.get(),
             "wsl_distribution": (self.compat or {}).get("wsl", {}).get("distribution", ""),
+            "export_python": self._export_python(),
         }, capabilities=self.compat)
 
     def start(self):
@@ -545,11 +651,11 @@ class ModelExportPanel(tk.Frame):
         logfile = self.logs_dir / f"model_export_{stamp}.log"
         settings_file.write_text(json.dumps(values, indent=2), encoding="utf-8")
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        command = [str(self.env_python()), "-u", str(Path(__file__).with_name("run_model_export.py")), str(settings_file)]
+        command = [str(self._export_python()), "-u", str(Path(__file__).with_name("run_model_export.py")), str(settings_file)]
         try:
             with logfile.open("w", encoding="utf-8") as stream:
                 proc = subprocess.Popen(command, cwd=str(Path(__file__).parent),
-                                        env=dict(self.process_env()), stdin=subprocess.DEVNULL,
+                                        env=self._export_env(), stdin=subprocess.DEVNULL,
                                         stdout=stream, stderr=subprocess.STDOUT,
                                         creationflags=flags, start_new_session=(os.name != "nt"))
         except OSError as exc:
@@ -566,6 +672,13 @@ class ModelExportPanel(tk.Frame):
         self.status.set("Exporting " + values["format"].upper() + " …")
         self.progress.pack(side="right", fill="x", expand=True, padx=(14, 0))
         self.progress.start(13)
+        self._append('Selected export target: ' + FORMATS[values['format']][0] +
+                     " · Ultralytics format=" + repr(values['ultralytics_format']))
+        self._append('Output model name: ' +
+                     (values['model_name'] + {'engine': '.engine', 'onnx': '.onnx', 'litert': '.tflite'}[values['format']]
+                      if values['model_name'] else '(Ultralytics default)'))
+        self._append('Export using Python: ' + self._export_python())
+        self._append('Ultralytics auto-installation disabled for this job.')
         self._append("Starting native Ultralytics export. Full log: " + str(logfile))
         self._emit("Model export started: " + str(logfile))
         self._expanded_setup = False
@@ -672,6 +785,13 @@ class ModelExportPanel(tk.Frame):
                     self._last_result = job["result"]
                     self.open_btn.configure(state="normal")
                     self.status.set("Export completed · " + job["format"].upper())
+                    if job['format'] == 'engine':
+                        check = self._last_result.get('tensorrt_verification') or {}
+                        if check.get('verified') is True:
+                            self.status.set('TensorRT engine verified · synthetic inference passed')
+                            self._append('Deployment check PASSED with TensorRT '
+                                         + str(check.get('tensorrt', 'unknown')) + ' in '
+                                         + str(check.get('python', 'selected Python')))
                     self._append("Saved exported model: " + self._last_result["exported_model"])
                     self._emit("Model export completed: " + self._last_result["exported_model"])
                 else:

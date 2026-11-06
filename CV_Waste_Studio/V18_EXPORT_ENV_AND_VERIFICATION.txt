@@ -1,0 +1,38 @@
+CV Waste Studio v18 - Export Environment / Jetson TensorRT Safety
+================================================================
+
+Model Export now lets you choose a SEPARATE interpreter for exporting engines.
+The Studio GUI stays in its own Conda environment, while exports run using
+that exact Python executable.
+
+For Jetson Thor / SenSoRTC:
+  Select "SenSoRTC · install-20261106-123223-1db6793b" in the Export Python
+  environment dropdown (or browse to its bin/python). Check the displayed
+  TensorRT Python and JetPack system versions before running an export.
+  Studio saves this interpreter selection for later sessions.
+
+Export subprocesses set YOLO_AUTOINSTALL=False BEFORE importing Ultralytics.
+The app never offers pip TensorRT installation into an external environment,
+OR on NVIDIA Jetson. JetPack's system-provided bindings are preferred.
+
+Post-export engine verification is REQUIRED: the selected export interpreter
+launches a separate test process that uses the Ultralytics TensorRT loader
+and performs a single synthetic-input inference. Only when that succeeds
+is the engine reported as a completed verified export. Verification details
+are written to export_summary.json. If it fails, the engine and diagnostics
+are retained, but Studio reports the export as failed/unsafe for deployment.
+
+This is not an accuracy test, nor an end-to-end SenSoRTC camera integration
+or Modbus test. It does ensure the selected environment can deserialize and
+execute the engine when the same TensorRT libraries are used in deployment.
+Do not use engines supplied from untrusted parties for verification.
+
+The version check is an advisory comparison between Python's TensorRT
+version and the host libnvinfer package when dpkg metadata is available.
+If these conflict on Jetson, engine export is disabled. If the system
+package cannot be identified, the end-to-end runtime test still applies.
+
+Use your intended export settings. Example from supplied export.txt:
+  format=engine, imgsz=1280, device=0, half=True, batch=1.
+
+Actual Thor TensorRT build/inference still requires hardware testing.
