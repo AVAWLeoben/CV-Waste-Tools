@@ -26,6 +26,9 @@ Studio uses the **Ultralytics YOLO APIs** for training, prediction, validation, 
 **New here?** Go to the **[Releases page](https://github.com/AVAWLeoben/CV-Waste-Tools/releases)** to find the available download and its release notes. The application is Python-based and uses **Conda** for environment setup; it is not a standalone executable requiring no dependencies.
 
 ## Screenshots
+**| Dataset Creation|**
+![Model export with platform and dependency checks](https://github.com/AVAWLeoben/CV-Waste-Tools/blob/79b69c9aad938632cf6c4d5f5c09d2b57cea7a90/Screenshots/dataset_page.png)
+
 
 | Training monitor | Hyperparameter tuning |
 |:---:|:---:|
