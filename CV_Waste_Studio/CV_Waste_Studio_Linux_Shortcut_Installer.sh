@@ -12,9 +12,11 @@ if [[ ! -f "$LAUNCHER" ]]; then
   exit 1
 fi
 
-# Look for the actual supplied logo, regardless of PNG resolution.
+# Prefer the exact logo.png shipped in the current Studio assets directory.
+# Older Studio releases used differently named PNGs, so retain those too.
+# If none match, accept any nonempty PNG in assets/ before falling back.
 ICON=""
-for filename in cv_waste_studio_256.png cv_waste_studio.png \
+for filename in logo.png cv_waste_studio_256.png cv_waste_studio.png \
                 cv_waste_studio_128.png cv_waste_studio_64.png \
                 cv_waste_studio_sidebar.png cv_waste_studio_48.png \
                 cv_waste_studio_32.png; do
@@ -23,9 +25,17 @@ for filename in cv_waste_studio_256.png cv_waste_studio.png \
     break
   fi
 done
+if [[ -z "$ICON" && -d "$APP_DIR/assets" ]]; then
+  while IFS= read -r -d '' candidate; do
+    if [[ -s "$candidate" ]]; then
+      ICON="$candidate"
+      break
+    fi
+  done < <(find "$APP_DIR/assets" -maxdepth 1 -type f -iname '*.png' -print0 | sort -z)
+fi
 if [[ -z "$ICON" ]]; then
   ICON="applications-graphics"
-  printf 'Warning: no PNG icon found in assets/. Using a system fallback icon.\n' >&2
+  printf 'Warning: no nonempty PNG icon found in %s/assets/. Using a system fallback icon.\n' "$APP_DIR" >&2
 fi
 
 # Escape an argument according to freedesktop.org Desktop Entry's Exec rules.
