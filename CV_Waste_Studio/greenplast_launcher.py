@@ -91,6 +91,7 @@ class Studio:
         self.train_job = None
         self.best_epoch_tracker = BestEpochTracker()
         self.train_button = None
+        self.sanitise_panel = None
         self.settings_expanded = False
         self.audit_gui = None
         self.recall_gui = None
@@ -692,8 +693,24 @@ class Studio:
                                           style="Danger.TButton", command=self.stop_training,
                                           state="disabled")
             self.stop_button.pack(side="right")
-            _, self.train_button = _all_in_one_gui(
-                train, self.start_training, on_preannotate=self.start_preannotation)
+            train_form, self.train_button = _all_in_one_gui(
+                train, self.start_training, on_preannotate=self.start_preannotation,
+                sanitise_options={
+                    "env_python": lambda: env_python(self.env),
+                    "export_python": lambda: (self.export_panel._export_python()
+                                              if self.export_panel is not None
+                                              else env_python(self.env)),
+                    "process_env": lambda: process_environment(self.env),
+                    "logs_dir": APP_DIR / "logs",
+                    "on_log": lambda line: self.log_line("train", "Sanitise: " + str(line)),
+                    "can_start": lambda: self.train_job is None and not (
+                        self.comparison_panel and self.comparison_panel.busy) and not (
+                        self.tuning_panel and self.tuning_panel.busy) and not (
+                        self.export_panel and self.export_panel.busy) and not (
+                        self.audit_gui and self.audit_gui.busy) and not (
+                        self.recall_gui and self.recall_gui.busy),
+                })
+            self.sanitise_panel = train_form.sanitise_panel
             self.train_button.configure(style="Accent.TButton")
             self.audit_gui = AuditGUI(self._scroll_host(audit), embedded=True,
                                       on_log=lambda message: self.log_line("audit", message))
@@ -711,6 +728,7 @@ class Studio:
                 logs_dir=APP_DIR / "logs",
                 on_log=lambda line: self.log_line("comparison", line),
                 can_start=lambda: self.train_job is None and not (
+                    self.sanitise_panel and self.sanitise_panel.busy) and not (
                     self.export_panel and self.export_panel.busy) and not (
                     self.recall_gui and self.recall_gui.busy) and not (
                     self.audit_gui and self.audit_gui.busy))
@@ -720,6 +738,7 @@ class Studio:
                 process_env=lambda: process_environment(self.env),
                 logs_dir=APP_DIR / "logs", on_log=lambda line: self.log_line("tuning", line),
                 can_start=lambda: self.train_job is None and not (
+                    self.sanitise_panel and self.sanitise_panel.busy) and not (
                     self.comparison_panel and self.comparison_panel.busy) and not (
                     self.export_panel and self.export_panel.busy) and not (
                     self.recall_gui and self.recall_gui.busy) and not (
@@ -730,6 +749,7 @@ class Studio:
                 process_env=lambda: process_environment(self.env),
                 logs_dir=APP_DIR / "logs", on_log=lambda line: self.log_line("export", line),
                 can_start=lambda: self.train_job is None and not (
+                    self.sanitise_panel and self.sanitise_panel.busy) and not (
                     self.tuning_panel and self.tuning_panel.busy) and not (
                     self.comparison_panel and self.comparison_panel.busy) and not (
                     self.recall_gui and self.recall_gui.busy) and not (
@@ -743,7 +763,7 @@ class Studio:
             return
         self.ready = True
         self._show("train")
-        self.log_line("train", "Ready. Split, train an existing dataset, or pre-annotate images.")
+        self.log_line("train", "Ready. Split, train, pre-annotate, or sanitise YOLO datasets.")
         self.log_line("audit", "Ready. The audit reads annotations without modifying them.")
         self.log_line("recall", "Ready. Cached predictions can be reused for new precision thresholds.")
         self.log_line("results", "Select a recent training run or browse to an Ultralytics run folder.")
@@ -758,7 +778,8 @@ class Studio:
         self._start_job(settings, "preannotate")
 
     def _start_job(self, settings, kind):
-        if (self.tuning_panel and self.tuning_panel.busy) or (
+        if (self.sanitise_panel and self.sanitise_panel.busy) or (
+                self.tuning_panel and self.tuning_panel.busy) or (
                 self.comparison_panel and self.comparison_panel.busy) or (
                 self.export_panel and self.export_panel.busy):
             messagebox.showwarning("GPU job active",
@@ -954,6 +975,8 @@ class Studio:
         except queue.Empty:
             pass
         self._poll_training()
+        if self.sanitise_panel is not None:
+            self.sanitise_panel.poll()
         if self.comparison_panel is not None:
             self.comparison_panel.poll()
         if self.tuning_panel is not None:
@@ -982,6 +1005,13 @@ class Studio:
 
     def on_close(self):
         active_train = self.train_job and self.train_job["process"].poll() is None
+        active_sanitise = self.sanitise_panel and self.sanitise_panel.busy
+        if active_sanitise:
+            messagebox.showwarning("Sanitisation still running",
+                "Complete the current dataset sanitisation operation before closing Studio. "
+                "This prevents interrupting in-place deletions or leaving a partial dataset copy.",
+                parent=self.root)
+            return
         active_audit = self.audit_gui and self.audit_gui.busy
         active_recall = self.recall_gui and self.recall_gui.busy
         active_comparison = self.comparison_panel and self.comparison_panel.busy

@@ -1,0 +1,54 @@
+CV Waste Studio v18.4 — Sanitise Datasets
+=========================================
+
+Datasets & Training > 4. Sanitise Datasets
+
+Two ways of finding images that should be removed:
+  1) Run a selected local Ultralytics .pt, .engine or .onnx model on the images.
+     An image is marked for removal when its prediction contains no boxes.
+     Configurable confidence, image size, batch, and device.
+     Important: missed detections can cause valid images to be removed.
+  2) Inspect existing YOLO label .txt files. Whitespace-only/empty labels mark
+     their paired images for removal. Missing labels are preserved by default;
+     a separate checkbox can include them.
+
+Supported layouts include dataset/images/{train,val,test} plus sibling labels,
+train/images plus train/labels, and single mixed image/label directories.
+
+SAFE WORKFLOW
+  A) Choose the source dataset (or images folder) and a detection method.
+  B) Choose Create cleaned copy (recommended) or Delete from original dataset.
+  C) Select 1. Scan / preview. No image or label is changed during the scan.
+  D) Review the preview in the interface and complete JSON plan in logs/.
+  E) Select 2. Apply sanitisation.
+     - Cleaned copy: choose a new, unused output folder OUTSIDE source.
+       All retained files are copied, with removed images/paired labels omitted.
+       Source is not modified. If copying fails, temporary copy is cleaned up.
+     - In-place: type DELETE into a confirmation dialog. Image/label pairs are
+       permanently removed; no undo or recycle bin is provided. The plan and
+       an audit of requested deletions are stored in Studio's logs/ folder.
+
+Common train/val/test image lists are refreshed to exclude removed images.
+In copied datasets, absolute dataset references in ordinary data.yaml are
+rewritten for the new folder. Examine custom YAML layouts and externally
+referenced datasets before training. Files outside selected dataset are not
+sanitised or copied. Symbolic-link images/labels are not followed.
+
+Scanning is run in a separate Python process; the interface remains responsive.
+For .engine/.onnx models the selected 07 Model Export Python runtime is used,
+so Jetson users can select the runtime compatible with the TensorRT engine.
+Auto-installation of Ultralytics dependencies is disabled for the worker.
+
+SAFETY NOTES
+  - Default mode creates a copy and does NOT delete the source dataset.
+  - For in-place operations, the preview is mandatory; the user types DELETE.
+  - A source image/label modified after scanning triggers re-scan instead of
+    deletion. New images added after a scan also invalidate the plan.
+  - Stop applies to scanning only; applying deletions cannot be stopped from
+    the GUI, because interruptions may leave the dataset partially modified.
+  - Prefer a backup before any in-place action. The deletion audit is NOT a
+    backup and cannot restore deleted bytes.
+  - Conf=0.25 is a starting point, not proof an image has no object. False
+    negatives can erase valuable training data. Inspect the preview carefully.
+  - If using TensorRT models, enter the engine's actual image size and batch
+    and select its compatible Python/TensorRT environment in Model Export.

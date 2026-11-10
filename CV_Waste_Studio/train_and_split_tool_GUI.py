@@ -1142,7 +1142,7 @@ def _save_disk_cache_manifest(manifest, candidates):
 
 
 # --- ALL-IN-ONE MULTI-DATASET SPLIT + TRAIN (NO IMAGE/LABEL COPYING) ---
-def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
+def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None, sanitise_options=None):
     """Build the original split/train form in a standalone window or embedded page.
 
     An embedded form calls on_submit(validated_settings), without destroying
@@ -1245,6 +1245,12 @@ def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
     notebook.add(train_page, text="2. Model & training")
     preannotate_page = ttk.Frame(notebook)
     notebook.add(preannotate_page, text="3. Pre-Annotate")
+    sanitise_page = ttk.Frame(notebook)
+    notebook.add(sanitise_page, text="4. Sanitise Datasets")
+    from dataset_sanitise_ui import DatasetSanitisePanel
+    sanitise_panel = DatasetSanitisePanel(sanitise_page, **(sanitise_options or {}))
+    sanitise_panel.pack(fill="both", expand=True)
+    main.sanitise_panel = sanitise_panel
     split_page.columnconfigure(0, weight=1)
     split_page.rowconfigure(0, weight=1)
     split_canvas = tk.Canvas(split_page, highlightthickness=0, bd=0, background="#FFFFFF")
@@ -1790,6 +1796,9 @@ def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
     chosen_settings = {}
 
     def submit():
+        if notebook.select() == str(sanitise_page):
+            sanitise_panel.start_scan()
+            return
         if notebook.select() == str(preannotate_page):
             from preannotate_dataset import _settings
             annotation = {
@@ -1928,19 +1937,21 @@ def _all_in_one_gui(parent=None, on_submit=None, on_preannotate=None):
         notebook.tab(split_page, state="disabled" if is_existing else "normal")
         if is_existing:
             existing_frame.pack(fill="x", pady=(0, 8), after=mode_bar)
-            if notebook.select() != str(preannotate_page):
+            if notebook.select() not in (str(preannotate_page), str(sanitise_page)):
                 notebook.select(train_page)
         else:
             existing_frame.pack_forget()
             if not results_custom and sources:
                 fill_defaults()
-            if notebook.select() != str(preannotate_page) and (
+            if notebook.select() not in (str(preannotate_page), str(sanitise_page)) and (
                     not is_training or notebook.select() == str(train_page)):
                 notebook.select(split_page)
         update_action_button()
 
     def update_action_button(_event=None):
-        if notebook.select() == str(preannotate_page):
+        if notebook.select() == str(sanitise_page):
+            launch_button.configure(text="Scan dataset / preview")
+        elif notebook.select() == str(preannotate_page):
             launch_button.configure(text="Start pre-annotation")
         else:
             launch_button.configure(text={
