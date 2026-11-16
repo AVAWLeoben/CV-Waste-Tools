@@ -41,6 +41,7 @@ class ModelExportPanel(tk.Frame):
         self.job = None
         self.install_job = None
         self._probe_pending = False
+        self._probe_python = None
         self._probe_queue = queue.Queue()
         self._prompted_for_trt = False
         self._prompted_for_wsl = False
@@ -48,6 +49,9 @@ class ModelExportPanel(tk.Frame):
         self._expanded_setup = False
         self._tab_opened = False
         self._env_options = {}
+        self._env_discovery_queue = queue.Queue()
+        self._env_discovery_running = False
+        self._env_full_scan_started = False
         self._build()
         self.after(500, self.check_compatibility)
 
@@ -130,8 +134,13 @@ class ModelExportPanel(tk.Frame):
                                       state="readonly", width=52)
         self.env_combo.pack(side="left", padx=(11, 5), fill="x", expand=True)
         self.env_combo.bind('<<ComboboxSelected>>', self._environment_changed)
-        ttk.Button(environment_row, text="Refresh", command=self.refresh_environments).pack(side="left", padx=3)
+        self.refresh_env_btn = ttk.Button(environment_row, text="Find environments",
+                                          command=self.refresh_environments)
+        self.refresh_env_btn.pack(side="left", padx=3)
         ttk.Button(environment_row, text="Browse Python…", command=self.browse_environment).pack(side="left", padx=3)
+        self.env_discovery_status = tk.StringVar(value="Discovering local Python environments…")
+        ttk.Label(compatibility_block, textvariable=self.env_discovery_status,
+                  style="Muted.TLabel", wraplength=820).pack(fill="x", pady=(0, 6))
         compatibility_row = ttk.Frame(compatibility_block)
         compatibility_row.pack(fill="x")
         ttk.Button(compatibility_row, text="Recheck environment",
@@ -333,19 +342,68 @@ class ModelExportPanel(tk.Frame):
     def _external_export_python(self):
         return Path(self._export_python()).resolve() != Path(self.env_python()).resolve()
 
+    def _populate_environments(self, items, preferred):
+        """Update choices without losing an operator's current custom selection."""
+        options = {item['label'] + '  |  ' + item['python']: item['python']
+                   for item in items}
+        if preferred and Path(preferred).is_file() and preferred not in options.values():
+            options['Custom · ' + preferred] = preferred
+        # Keep a current user-selected custom interpreter during refresh.
+        previous = self._export_python() if self._env_options else ''
+        if previous and Path(previous).is_file() and previous not in options.values():
+            options['Custom · ' + previous] = previous
+        self._env_options = options
+        self.env_combo.configure(values=tuple(options))
+        preferred = preferred if preferred in options.values() else previous
+        selected = next((label for label, python in options.items() if python == preferred), None)
+        self.export_env_choice.set(selected or next(iter(options), ''))
+        count = len(items)
+        self.env_discovery_status.set(
+            f"Found {count} Python environment{'s' if count != 1 else ''}. "
+            "Select one to check ONNX/TensorRT compatibility. "
+            "Use Find environments to rescan Conda and custom prefixes.")
+
     def refresh_environments(self, initial=False):
-        preferred = load_selection() if initial else self._export_python()
-        items = discover_export_environments(str(self.env_python()))
-        self._env_options = {item['label'] + '  |  ' + item['python']: item['python'] for item in items}
-        if preferred and Path(preferred).is_file() and preferred not in self._env_options.values():
-            self._env_options['Custom · ' + preferred] = preferred
-        self.env_combo.configure(values=tuple(self._env_options))
-        name = next((label for label, python in self._env_options.items() if python == preferred), None)
-        if name is None:
-            name = next(iter(self._env_options), '')
-        self.export_env_choice.set(name)
-        if not initial:
-            self._environment_changed()
+        """Fast local discovery first; complete Conda CLI scan off the UI thread."""
+        if initial:
+            preferred = load_selection() or str(self.env_python())
+            items = discover_export_environments(str(self.env_python()), conda_envs=[])
+            self._populate_environments(items, preferred)
+            return
+        if self._env_discovery_running:
+            return
+        self._env_discovery_running = True
+        self.refresh_env_btn.configure(state='disabled')
+        self.env_discovery_status.set('Finding Conda, virtualenv and SenSoRTC environments…')
+        python = str(self.env_python())
+        def worker():
+            try:
+                found = discover_export_environments(python)
+                self._env_discovery_queue.put(('success', found))
+            except Exception as exc:
+                self._env_discovery_queue.put(('error', str(exc)))
+        threading.Thread(target=worker, daemon=True, name='ExportEnvironmentDiscovery').start()
+        self.after(120, self._poll_environment_discovery)
+
+    def _poll_environment_discovery(self):
+        if not self.winfo_exists():
+            return
+        try:
+            outcome, value = self._env_discovery_queue.get_nowait()
+        except queue.Empty:
+            if self._env_discovery_running:
+                self.after(120, self._poll_environment_discovery)
+            return
+        self._env_discovery_running = False
+        self.refresh_env_btn.configure(state='normal')
+        if outcome == 'error':
+            self.env_discovery_status.set('Environment search failed: ' + str(value))
+            self._append('Environment search failed: ' + str(value))
+            return
+        previous = self._export_python()
+        self._populate_environments(value, previous)
+        self._append(f'Environment discovery: {len(value)} Python interpreter(s) found. '
+                     'Select an entry to check its export capabilities.')
 
     def browse_environment(self):
         path = filedialog.askopenfilename(parent=self, title='Select Python used for model export')
@@ -369,6 +427,8 @@ class ModelExportPanel(tk.Frame):
             save_selection(python)
             self._prompted_for_trt = False
             self.compat = None
+            self.start_btn.configure(state='disabled')
+            self.status.set('Checking selected export environment: ' + python)
             self._append('Export environment selected: ' + python)
             self.check_compatibility()
 
@@ -381,6 +441,7 @@ class ModelExportPanel(tk.Frame):
         if self._probe_pending or self.install_job is not None or self.busy:
             return
         self._probe_pending = True
+        self._probe_python = str(self._export_python())
         self.status.set("Checking export formats in: " + self._export_python())
         for radio in self.radios.values():
             radio.configure(state="disabled")
@@ -460,8 +521,11 @@ class ModelExportPanel(tk.Frame):
                                      else distro + ": " + reason))
 
     def on_show(self):
-        """Offer optional installation when the export section is first opened."""
+        """Discover all environments on first visit, without blocking the GUI."""
         self._tab_opened = True
+        if not self._env_full_scan_started:
+            self._env_full_scan_started = True
+            self.refresh_environments()
         if (self.compat and self.compat.get("cuda") and
                 self.compat.get("errors", {}).get("tensorrt") and
                 self._can_install_tensorrt() and not self._prompted_for_trt):
@@ -737,6 +801,13 @@ class ModelExportPanel(tk.Frame):
             while True:
                 kind, payload = self._probe_queue.get_nowait()
                 self._probe_pending = False
+                if self._probe_python != str(self._export_python()):
+                    # The operator switched environments while the previous
+                    # probe was running. Never apply its stale capabilities.
+                    self._append('Environment changed during compatibility check; '
+                                 'rechecking the newly selected Python.')
+                    self.check_compatibility()
+                    continue
                 if kind == "probe":
                     self._apply_probe(payload)
                 else:
